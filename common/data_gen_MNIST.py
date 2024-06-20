@@ -25,7 +25,7 @@ class DigitsDataset(Dataset):
     def __init__(self, x, y, aug='', con=0):
         self.x = x
         self.y = y
-        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int)*(-1))
+        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int_)*(-1))
         self.con = con
         if aug == '':
             self.transform = None

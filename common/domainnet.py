@@ -122,7 +122,7 @@ class DomainNet(Dataset):
             ])
         else:
             self.transform = transform
-        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int)*(-1))
+        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int_)*(-1))
         if ratio is not None:
             num = len(self.x)
             indexes = np.random.permutation(num)
@@ -162,7 +162,7 @@ class DomainNetFull(Dataset):
             ])
         else:
             self.transform = transform
-        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int)*(-1))
+        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int_)*(-1))
         if ratio is not None:
             num = len(self.x)
             indexes = np.random.permutation(num)

@@ -1,15 +1,7 @@
-from main_pacs import main as train_pacs
 import argparse
-import os
-import subprocess
-import multiprocessing as mp
-from functools import partial, reduce
-import shlex
-import time
-from copy import deepcopy
-import glob
-import shutil
+
 from common.utils import get_freer_gpu
+from main_pacs import main as train_pacs
 
 
 class Namespace:
@@ -22,7 +14,8 @@ def main(args):
     # For experiments on AdvST/AdvST-ME
     pacs_AdvST_args = Namespace(
         seed=args.seed,
-        algorithm="AdvST",  # ERM, ADA, AdvST
+        augment_encoder=False,
+        algorithm="memory-cat",  # ERM, ADA, AdvST
         model="resnet18",
         batch_size=32,
         num_classes=7,
@@ -43,12 +36,14 @@ def main(args):
         eta_min=0.01,  # parameter for the entropy regularizer in the minimization procedure
         beta=1.0,  # paramter for the contrastive loss regularizer
         gpu=args.gpu,
-        num_workers=8,
-        train_mode="contrastive",  # contrastive, norm
+        num_workers=0,
+        train_mode="norm",  # contrastive, norm
         tag="",
         gen_freq=1,
         domain_number=100,
         ratio=1.0,  # select how much training data to use
+        mixup_label=False,
+        tradeoff_aug_loss=1.0
     )
     # For ADA/ME-ADA/ERM experiments
     pacs_ada_args = Namespace(
@@ -79,6 +74,7 @@ def main(args):
         tag="",
         gen_freq=1,
         ratio=1.0,
+
     )
 
     expr_args = pacs_AdvST_args
@@ -91,7 +87,7 @@ if __name__ == "__main__":
     train_arg_parser.add_argument(
         "--save_path",
         type=str,
-        default="pacs_experiments/pacs_AdvST_test",
+        default="pacs_experiments/pacs_cat",
         help="path to saved models and results",
     )
     args = train_arg_parser.parse_args()

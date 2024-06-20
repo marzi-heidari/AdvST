@@ -5,7 +5,7 @@ from model_mnist import ModelADA as ADA_MNIST
 from model_mnist import ModelADASemantics as AdvST_MNIST
 
 
-from model_pacs import ModelBaseline as ERM_PACS
+from model_pacs import ModelBaseline as ERM_PACS, ModelMemoey
 from model_pacs import ModelADA as ADA_PACS
 from model_pacs import ModelADASemantics as AdvST_PACS
 
@@ -47,6 +47,8 @@ def main(args):
                 model_obj = ADA_PACS(flags=args)
             elif args.algorithm == "AdvST":
                 model_obj = AdvST_PACS(flags=args)
+            elif args.algorithm == "memory-cat":
+                model_obj = ModelMemoey(flags=args)
 
         elif dataset == "domainnet":
             args.loops_min = -1  # use all test data for evaluation

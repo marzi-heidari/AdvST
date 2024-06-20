@@ -56,11 +56,11 @@ class PACS(Dataset):
                 ])
             else:
                 self.transform = transform
-
+        print(path)
         f = h5py.File(path, "r")
         self.x = np.array(f['images'])
         self.y = np.array(f['labels'])
-        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int)*(-1))
+        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int_)*(-1))
         if ratio is not None:
             num = len(self.x)
             indexes = np.random.permutation(num)

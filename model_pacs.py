@@ -1,38 +1,32 @@
 from __future__ import print_function, absolute_import, division
 
-import os
-import torch
-import numpy as np
-from torch.autograd import Variable
+import random
+from copy import deepcopy
+
+import kornia
+import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+import torchvision.transforms as transforms
 from torch.optim import lr_scheduler
-from torch.utils.data import DataLoader, RandomSampler
-from common.pacs import PACS, PACSTensor, PACSMultiple, PACSTensorMultiple, Denormalise
-from models.alexnet import alexnet
-from models.resnet_vanilla import resnet18
-from common.data_reader import BatchImageGenerator
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from common.contrastive import SupConLoss
+from common.pacs import PACS, PACSMultiple, Denormalise
 from common.utils import *
 from common.utils import (
     fix_all_seed,
     write_log,
-    adam,
     sgd,
     compute_accuracy,
     entropy_loss,
     Averager,
 )
-import pickle
-import torchvision.transforms as transforms
-import torch.nn as nn
-import torch.nn.functional as F
-import kornia
-import random
-from copy import deepcopy
-from common.contrastive import SupConLoss
-from tqdm import tqdm
-import torchvision
-import matplotlib.pyplot as plt
-import math
 from config import PACS_DATA_FOLDER
+from models.resnet_vanilla import resnet18
+from networks import AdversarialFeatureMemoryBank, FeatureAugmentationNetwork, FeatureAugmentationNetworkCat
 
 
 # https://github.com/HAHA-DL/Episodic-DG
@@ -83,7 +77,7 @@ class DataPool:
         if self.num == 0:
             return []
         if num < 0:
-            return self.data[0 : self.num]
+            return self.data[0: self.num]
         else:
             num = min(num, self.num)
             indexes = list(range(self.num))
@@ -278,7 +272,7 @@ class ModelBaseline(object):
         self.configure(flags)
 
     def get_images(
-        self, images, labels, save_path, shuffle=False, sel_indexes=None, nsamples=10
+            self, images, labels, save_path, shuffle=False, sel_indexes=None, nsamples=10
     ):
         class_dict = {}
         for i, l in enumerate(labels):
@@ -338,9 +332,9 @@ class ModelBaseline(object):
         if not os.path.exists(flags.logs):
             os.makedirs(flags.logs)
         flag_str = (
-            "--------Parameters--------\n"
-            + "\n".join(["{}={}".format(k, flags.__dict__[k]) for k in flags.__dict__])
-            + "\n--------------------"
+                "--------Parameters--------\n"
+                + "\n".join(["{}={}".format(k, flags.__dict__[k]) for k in flags.__dict__])
+                + "\n--------------------"
         )
         print("flags:", flag_str)
         flags_log = os.path.join(flags.logs, "flags_log.txt")
@@ -477,9 +471,9 @@ class ModelBaseline(object):
             mean_acc = np.array(acc_arr).mean()
             names = [n for n, _ in self.test_loaders]
             res = (
-                "\n{} ".format(self.train_name)
-                + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
-                + " Mean:{:.6f}".format(mean_acc)
+                    "\n{} ".format(self.train_name)
+                    + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
+                    + " Mean:{:.6f}".format(mean_acc)
             )
             if best_val_acc < val_acc:
                 best_val_acc = val_acc
@@ -514,7 +508,7 @@ class ModelBaseline(object):
         labels = []
         with torch.no_grad():
             for images_test, labels_test, _ in tqdm(
-                test_loader, leave=False, desc="test"
+                    test_loader, leave=False, desc="test"
             ):
                 images_test, labels_test = images_test.cuda(), labels_test.cuda()
                 out, _ = self.network(images_test)
@@ -591,10 +585,10 @@ class ModelADA(ModelBaseline):
         )
 
         for i, (images_train, labels_train, _) in tqdm(
-            enumerate(train_loader),
-            total=len(train_loader),
-            leave=False,
-            desc="Maximum",
+                enumerate(train_loader),
+                total=len(train_loader),
+                leave=False,
+                desc="Maximum",
         ):
             inputs, targets = images_train.cuda(), labels_train.cuda()
             out, tuples = self.network(x=inputs)
@@ -611,7 +605,7 @@ class ModelADA(ModelBaseline):
                 # loss
                 semantic_dist = self.dist_fn(tuples["Embedding"], inputs_embedding)
                 loss = (
-                    loss - flags.gamma * semantic_dist + flags.eta * entropy_loss(out)
+                        loss - flags.gamma * semantic_dist + flags.eta * entropy_loss(out)
                 )
 
                 # init the grad to zeros first
@@ -653,13 +647,13 @@ class ModelADA(ModelBaseline):
                 pin_memory=True,
             )
             self.scheduler.T_max = counter_ite + len(self.train_loader) * (
-                flags.train_epochs - epoch
+                    flags.train_epochs - epoch
             )
             for i, (images_train, labels_train, _) in tqdm(
-                enumerate(self.train_loader),
-                total=len(self.train_loader),
-                leave=False,
-                desc="train-epoch:{}".format(epoch + 1),
+                    enumerate(self.train_loader),
+                    total=len(self.train_loader),
+                    leave=False,
+                    desc="train-epoch:{}".format(epoch + 1),
             ):
                 counter_ite += 1
 
@@ -685,9 +679,9 @@ class ModelADA(ModelBaseline):
             mean_acc = np.array(acc_arr).mean()
             names = [n for n, _ in self.test_loaders]
             res = (
-                "\n{} ".format(self.train_name)
-                + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
-                + " Mean:{:.6f}".format(mean_acc)
+                    "\n{} ".format(self.train_name)
+                    + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
+                    + " Mean:{:.6f}".format(mean_acc)
             )
             msg = "[{}] train_loss:{:.4f} cls:{:.4f} lr:{:.4f} val_acc:{:.4f}".format(
                 epoch,
@@ -709,7 +703,7 @@ class ModelADA(ModelBaseline):
             write_log(msg, flags_log)
 
             if ((epoch) % flags.gen_freq == 0) and (
-                counter_k < flags.k
+                    counter_k < flags.k
             ):  # if T_min iterations are passed
                 print("Generating adversarial images [iter {}]".format(counter_k))
                 images, labels = self.maximize(flags)
@@ -720,6 +714,245 @@ class ModelADA(ModelBaseline):
                     dim=0,
                 )
                 counter_k += 1
+
+
+class ModelMemoey(ModelBaseline):
+
+    def __init__(self, flags):
+        super(ModelMemoey, self).__init__(flags)
+        self.args = flags
+
+        if flags.seen_index == 2:
+            memory_size = 167
+        elif flags.seen_index == 0:
+            memory_size = 204
+        elif flags.seen_index == 1:
+            memory_size = 234
+        elif flags.seen_index == 3:
+            memory_size = 392
+
+        self.device = torch.device(f"cuda:{flags.gpu}")
+        self.adv_memory = AdversarialFeatureMemoryBank(memory_size=memory_size)
+        self.augment_net = FeatureAugmentationNetworkCat(512).to(self.device)
+
+
+    def setup_path(self, flags):
+        root_folder = PACS_DATA_FOLDER
+        dataset_names = ["art_painting", "cartoon", "photo", "sketch"]
+        seen_index = flags.seen_index
+        self.preprocess = transforms.Compose(
+            [
+                transforms.Resize(224),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
+        self.train_transform = transforms.Compose(
+            [
+                transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
+        if not os.path.exists(flags.logs):
+            os.makedirs(flags.logs)
+
+        if type(seen_index) == list:
+            names = [dataset_names[i] for i in seen_index]
+            self.train_name = "+".join(names)
+            self.train_dataset = PACSMultiple(root_folder, names, "train")
+            self.val_dataset = PACSMultiple(root_folder, names, "val")
+            self.test_loaders = []
+            for index, name in enumerate(dataset_names):
+                if index not in seen_index:
+                    dataset = PACS(root_folder, name, "test")
+                    loader = DataLoader(
+                        dataset,
+                        batch_size=flags.batch_size,
+                        shuffle=False,
+                        num_workers=flags.num_workers,
+                        pin_memory=False,
+                    )
+                    self.test_loaders.append((name, loader))
+
+        else:
+            self.train_dataset = PACS(
+                root_folder, dataset_names[seen_index], "train", ratio=flags.ratio
+            )
+            self.train_name = dataset_names[seen_index]
+            self.val_dataset = PACS(root_folder, dataset_names[seen_index], "val")
+            all_dataset = PACS(
+                root_folder, dataset_names[seen_index], "train", ratio=flags.ratio
+            )
+            all_dataset.x = torch.cat([all_dataset.x, self.val_dataset.x], 0)
+            all_dataset.y = torch.cat([all_dataset.y, self.val_dataset.y], 0)
+            all_dataset.op_labels = torch.cat(
+                [all_dataset.op_labels, self.val_dataset.op_labels], 0
+            )
+            self.all_loader = DataLoader(
+                all_dataset, batch_size=flags.batch_size, num_workers=0, shuffle=False
+            )
+            self.test_loaders = []
+            for index, name in enumerate(dataset_names):
+                if index != seen_index:
+                    dataset = PACS(root_folder, name, "test")
+                    loader = DataLoader(
+                        dataset,
+                        batch_size=flags.batch_size,
+                        shuffle=False,
+                        num_workers=flags.num_workers,
+                        pin_memory=False,
+                    )
+
+                    self.test_loaders.append((name, loader))
+
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=flags.batch_size,
+            shuffle=True,
+            num_workers=flags.num_workers,
+            pin_memory=False,
+        )
+        self.val_loader = DataLoader(
+            self.val_dataset,
+            batch_size=flags.batch_size,
+            shuffle=False,
+            num_workers=flags.num_workers,
+            pin_memory=False,
+        )
+
+    def configure(self, flags):
+        super(ModelMemoey, self).configure(flags)
+        self.dist_fn = torch.nn.MSELoss()
+        self.conloss = SupConLoss()
+        self.mean = torch.tensor([0.485, 0.456, 0.406])
+        self.std = torch.tensor([0.229, 0.224, 0.225])
+        self.image_transform = transforms.ToPILImage()
+        self.image_denormalise = Denormalise(
+            [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+        )
+
+
+        self.scheduler = lr_scheduler.MultiStepLR(
+            optimizer=self.optimizer, milestones=[30], gamma=0.1
+        )
+
+    def save_model(self, file_name, flags):
+        outfile = os.path.join(flags.model_path, file_name)
+
+
+        torch.save(
+            {"state": self.network.state_dict(), "args": flags},
+            outfile,
+        )
+
+    def load_model(self, flags):
+        print("Load model from ", flags.chkpt_path)
+        model_dict = torch.load(flags.chkpt_path)
+        prob_tuples = model_dict["aug_probs"]
+
+        self.network.load_state_dict(model_dict["state"])
+
+    def train(self, flags):
+        counter_k = 0
+        best_val_acc = 0
+        best_test_acc = 0
+        flags_log = os.path.join(flags.logs, "loss_log.txt")
+        if not os.path.exists(flags.model_path):
+            os.makedirs(flags.model_path)
+        train_dataset = deepcopy(self.train_dataset)
+        data_pool = DataPool(flags.k + 1)
+        data_pool.add((train_dataset.x, train_dataset.y, train_dataset.op_labels))
+
+        # train_dataset.transform = self.train_transform
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=flags.batch_size,
+            num_workers=flags.num_workers,
+            shuffle=True
+            # sampler=RandomSampler(train_dataset, True,flags.loops_min*flags.batch_size)
+        )
+        counter_ite = 0
+        self.adv_memory.init_memory_bank(self.network, train_loader, self.device)
+        for epoch in range(1, flags.train_epochs + 1):
+            loss_avger = Averager()
+            cls_loss_avger = Averager()
+            con_loss_avger = Averager()
+
+            for ite, (images_train, labels_train, op_labels) in tqdm(
+                    enumerate(train_loader, start=1),
+                    total=len(train_loader),
+                    leave=False,
+                    desc="train-epoch{}".format(epoch),
+            ):
+                self.network.train()
+                bn_eval(self.network)
+                counter_ite += 1
+                inputs, labels = images_train.cuda(), labels_train.cuda()
+                img_shape = inputs.shape[-3:]
+                outputs, tuples = self.network(x=inputs.reshape(-1, *img_shape))
+                features = tuples["Embedding"]
+
+                cls_loss_ele = self.loss_per_ele(outputs, labels.reshape(-1))
+                cls_loss = cls_loss_ele.mean()
+
+                cls_loss_avger.add(cls_loss.item())
+
+                memory_features, memory_labels = self.adv_memory.memory_bank
+
+                if self.args.augment_encoder:
+                    features_aug, labels_aug = self.augment_net(features, labels, memory_features.detach(),
+                                                                self.args.mixup_label)
+                    # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
+                else:
+                    features_aug, labels_aug = self.augment_net(features, labels, memory_features.detach())
+                    # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
+
+                logits_aug = self.network.fc(features_aug)
+                if self.args.mixup_label:
+                    loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
+                else:
+                    loss_aug = F.cross_entropy(logits_aug, labels_aug)
+                # if epoch == 0:
+                #     loss = loss_cls
+                # else:
+                loss = cls_loss + loss_aug * self.args.tradeoff_aug_loss
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                loss_avger.add(loss.item())
+
+            self.scheduler.step()
+
+            val_acc = self.batch_test(self.all_loader)
+            acc_arr = self.batch_test_workflow()
+            mean_acc = np.array(acc_arr).mean()
+            names = [n for n, _ in self.test_loaders]
+            res = (
+                    "\n{} ".format(self.train_name)
+                    + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
+                    + " Mean:{:.6f}".format(mean_acc)
+            )
+            msg = "[{}] train_loss:{:.4f} cls:{:.4f} con:{:.4f} lr:{:.4f} val_acc:{:.4f}".format(
+                epoch,
+                loss_avger.item(),
+                cls_loss_avger.item(),
+                con_loss_avger.item(),
+                self.scheduler.get_last_lr()[0],
+                val_acc,
+            )
+
+            if best_test_acc < mean_acc:
+                best_test_acc = mean_acc
+                self.save_model("best_test_model.tar", flags)
+            if best_val_acc < val_acc:
+                best_val_acc = val_acc
+                msg += " (best)"
+                self.save_model("best_model.tar", flags)
+            msg += res
+            print(msg)
+            write_log(msg, flags_log)
 
 
 class ModelADASemantics(ModelBaseline):
@@ -891,7 +1124,7 @@ class ModelADASemantics(ModelBaseline):
                     semantic_perturb.parameters(), flags.lr_max
                 )
                 ori_inputs = (
-                    inputs * std.view(1, 3, 1, 1) + mean.view(1, 3, 1, 1)
+                        inputs * std.view(1, 3, 1, 1) + mean.view(1, 3, 1, 1)
                 ).data
                 while diff_loss > 0.1 and iter_count < flags.loops_adv:
                     inputs_max = semantic_perturb(ori_inputs.data)
@@ -904,9 +1137,9 @@ class ModelADASemantics(ModelBaseline):
                     semantic_loss = self.dist_fn(tuples["Embedding"], inputs_embedding)
 
                     loss = (
-                        cls_loss
-                        - flags.gamma * semantic_loss
-                        + flags.eta * entropy_loss(out)
+                            cls_loss
+                            - flags.gamma * semantic_loss
+                            + flags.eta * entropy_loss(out)
                     )
 
                     optimizer.zero_grad()
@@ -962,10 +1195,10 @@ class ModelADASemantics(ModelBaseline):
             con_loss_avger = Averager()
 
             for ite, (images_train, labels_train, op_labels) in tqdm(
-                enumerate(train_loader, start=1),
-                total=len(train_loader),
-                leave=False,
-                desc="train-epoch{}".format(epoch),
+                    enumerate(train_loader, start=1),
+                    total=len(train_loader),
+                    leave=False,
+                    desc="train-epoch{}".format(epoch),
             ):
                 self.network.train()
                 bn_eval(self.network)
@@ -984,9 +1217,9 @@ class ModelADASemantics(ModelBaseline):
 
                     con_loss = self.conloss(projs, labels)
                     loss = (
-                        cls_loss
-                        + flags.beta * con_loss
-                        - flags.eta_min * entropy_loss(outputs)
+                            cls_loss
+                            + flags.beta * con_loss
+                            - flags.eta_min * entropy_loss(outputs)
                     )
                     con_loss_avger.add(con_loss.item())
                 else:
@@ -1004,9 +1237,9 @@ class ModelADASemantics(ModelBaseline):
             mean_acc = np.array(acc_arr).mean()
             names = [n for n, _ in self.test_loaders]
             res = (
-                "\n{} ".format(self.train_name)
-                + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
-                + " Mean:{:.6f}".format(mean_acc)
+                    "\n{} ".format(self.train_name)
+                    + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
+                    + " Mean:{:.6f}".format(mean_acc)
             )
             msg = "[{}] train_loss:{:.4f} cls:{:.4f} con:{:.4f} lr:{:.4f} val_acc:{:.4f}".format(
                 epoch,
@@ -1029,9 +1262,9 @@ class ModelADASemantics(ModelBaseline):
             write_log(msg, flags_log)
 
             if (
-                epoch % flags.gen_freq == 0
-                and epoch < flags.train_epochs
-                and counter_k < flags.domain_number
+                    epoch % flags.gen_freq == 0
+                    and epoch < flags.train_epochs
+                    and counter_k < flags.domain_number
             ):  # if T_min iterations are passed
                 print("Generating adversarial images [iter {}]".format(counter_k))
                 images, labels, op_labels = self.maximize(flags, epoch)

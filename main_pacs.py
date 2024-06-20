@@ -1,6 +1,6 @@
 import argparse
 import os
-from model_pacs import ModelBaseline, ModelADA, ModelADASemantics
+from model_pacs import ModelBaseline, ModelADA, ModelADASemantics, ModelMemoey
 from common.utils import time_str, Timer, set_gpu
 from test_models import main as eval_models
 
@@ -8,6 +8,9 @@ from test_models import main as eval_models
 class Namespace:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+
+
+
 
 
 def main(args):
@@ -21,6 +24,8 @@ def main(args):
         model_obj = ModelADA(flags=args)
     elif args.algorithm == "AdvST":
         model_obj = ModelADASemantics(flags=args)
+    elif args.algorithm == "memory-cat":
+        model_obj = ModelMemoey(flags=args)
     else:
         raise RuntimeError
     timer = Timer()
@@ -40,7 +45,7 @@ if __name__ == "__main__":
     train_arg_parser = argparse.ArgumentParser(description="parser")
     train_arg_parser.add_argument("--seed", type=int, default=1, help="")
     train_arg_parser.add_argument(
-        "--algorithm", type=str, default="AdvST", help="Choose algorithm."
+        "--algorithm", type=str, default="memory-cat", help="Choose algorithm."
     )
     train_arg_parser.add_argument(
         "--model", type=str, default="alexnet", help="Choose model."

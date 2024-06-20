@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 import torch.nn.functional as F
@@ -62,7 +63,7 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AvgPool2d(7, stride=1)
-        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        self.fc = nn.Linear(512 * block.expansion * 2, num_classes)
 
         if 'contrastive' in contrastive:
             self.pro_head = nn.Linear(512 * block.expansion, 128)
@@ -79,7 +80,7 @@ class ResNet(nn.Module):
 
     def get_proj(self, fea):
         z = self.pro_head(fea)
-        z = F.normalize(z,dim=-1)
+        z = F.normalize(z, dim=-1)
         return z
 
     def bn_eval(self):
@@ -121,8 +122,10 @@ class ResNet(nn.Module):
         x = x.view(x.size(0), -1)
 
         end_points['Embedding'] = x
+
         if self.contrastive:
             end_points['Projection'] = self.get_proj(x)
+        x = torch.cat([x, x], dim=-1)
         x = self.fc(x)
 
         end_points['Predictions'] = F.softmax(input=x, dim=-1)
