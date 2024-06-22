@@ -1,21 +1,15 @@
 from __future__ import print_function, absolute_import, division
-import h5py
+
 import os
-import bz2
-import scipy
+
+import h5py
 import numpy as np
-import torchvision.transforms as transforms
-from PIL import Image
 import torch
-from torchvision import datasets
-from torchvision.datasets.utils import download_url
-from common.utils import unfold_label, shuffle_data
-from collections import Counter
-from common.autoaugment import SVHNPolicy, CIFAR10Policy
-from common.randaugment import RandAugment
-from functools import partial
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+
+
 # Dataset information: http://sketchx.eecs.qmul.ac.uk/downloads/
 # https://drive.google.com/drive/folders/0B6x7gtvErXgfUU1WcGY5SzdwZVk?resourcekey=0-2fvpQY_QSyJf2uIECzqPuQ
 

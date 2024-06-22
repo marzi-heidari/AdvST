@@ -16,7 +16,7 @@ class Namespace:
 def main(args):
     set_gpu(args.gpu)
     args.model_path = os.path.join(args.path, "models")
-    args.logs = os.path.join(args.path, "logs")
+    args.logs = os.path.join(args.path, "logs_lr")
 
     if args.algorithm == "ERM":
         model_obj = ModelBaseline(flags=args)

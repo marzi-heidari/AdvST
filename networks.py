@@ -1,11 +1,11 @@
 # import pandas as pd
-from copy import deepcopy
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.cluster import k_means
+from torch.nn.functional import one_hot
 from transformers import RobertaModel
 
 
@@ -82,40 +82,44 @@ class AdversarialFeatureMemoryBank:
         self.memory_size = memory_size
         self.memory_bank = None
 
-    def init_memory_bank(self, model, trainloader, device, n_clusters=10):
+    def init_memory_bank(self, model, trainloader, device, n_clusters=10, num_classes=2):
         model.eval()
 
         all_features = []
         all_labels = []
         with torch.no_grad():
-            for encoded_inputs, labels,_ in trainloader:
+            for encoded_inputs, labels, _ in trainloader:
                 encoded_inputs, labels = encoded_inputs.to(device), labels.to(device)
                 _, output = model(encoded_inputs)
                 features = output['Embedding']
                 all_features.append(features)
                 all_labels.append(labels)
 
-        all_features = torch.cat(all_features, dim=0)
-        all_labels = torch.cat(all_labels, dim=0)
+            all_features = torch.cat(all_features, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
 
-        _, cluster_label, _ = k_means(all_features.cpu().numpy(), n_clusters)
+            _, cluster_label, _ = k_means(all_features.cpu().numpy(), n_clusters)
 
-        size_per_cluster = np.histogram(cluster_label, bins=n_clusters)[0]
-        sample_per_cluster = (size_per_cluster / len(cluster_label) * self.memory_size).astype(np.int32)
-        max_cluster = np.argmax(size_per_cluster)
-        sample_per_cluster[max_cluster] += self.memory_size - np.sum(sample_per_cluster)
+            size_per_cluster = np.histogram(cluster_label, bins=n_clusters)[0]
+            sample_per_cluster = (size_per_cluster / len(cluster_label) * self.memory_size).astype(np.int32)
+            max_cluster = np.argmax(size_per_cluster)
+            sample_per_cluster[max_cluster] += self.memory_size - np.sum(sample_per_cluster)
 
-        selected_indices = []
-        for i in range(n_clusters):
-            indices_i = np.where(cluster_label == i)[0]
-            selected_indices.append(np.random.choice(indices_i, sample_per_cluster[i], replace=False))
+            selected_indices = []
+            for i in range(n_clusters):
+                indices_i = np.where(cluster_label == i)[0]
+                selected_indices.append(np.random.choice(indices_i, sample_per_cluster[i], replace=False))
 
-        selected_indices = np.concatenate(selected_indices)
-        self.memory_bank = (all_features[selected_indices], all_labels[selected_indices])
+            selected_indices = np.concatenate(selected_indices)
+            feats = all_features[selected_indices]
+            lbs = all_labels[selected_indices]
+        adv_feats = self.langevin_process_cat(model.fc, feats, lbs, num_iters=5)
+        # adv_feats_ = adv_feats / torch.norm(adv_feats, dim=-1, keepdim=True)
+        self.memory_bank = (adv_feats, lbs)
 
-
-    def update_memory_bank_cat(self, classifier, features, labels, epoch, num_iters=5):
+    def update_memory_bank_cat(self, classifier, features, labels, num_iters=5, device='cuda'):
         adv_features = self.langevin_process_cat(classifier, features, labels, num_iters)
+        # adv_features = adv_features_ / torch.norm(adv_features_, dim=-1, keepdim=True)
 
         memory_features, memory_labels = self.memory_bank
         with torch.no_grad():
@@ -129,18 +133,18 @@ class AdversarialFeatureMemoryBank:
             memory_labels[indices] = labels
 
     def update_memory_bank(self, classifier, features, labels, epoch, num_iters=5):
-                adv_features = self.langevin_process(classifier, features, labels, num_iters, epoch)
+        adv_features = self.langevin_process(classifier, features, labels, num_iters, epoch)
 
-                memory_features, memory_labels = self.memory_bank
-                with torch.no_grad():
-                    logits = classifier(memory_features)
-                    probs = F.softmax(logits, dim=-1)
-                    entropy = - torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
+        memory_features, memory_labels = self.memory_bank
+        with torch.no_grad():
+            logits = classifier(memory_features)
+            probs = F.softmax(logits, dim=-1)
+            entropy = - torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
 
-                    _, indices = torch.topk(entropy, k=features.size(0), largest=False)
+            _, indices = torch.topk(entropy, k=features.size(0), largest=False)
 
-                    memory_features[indices] = adv_features
-                    memory_labels[indices] = labels
+            memory_features[indices] = adv_features
+            memory_labels[indices] = labels
 
     def langevin_process(self, model, x, y, num_iters, epoch):
         eta = lambda t: 10 / (t + 1)
@@ -168,11 +172,13 @@ class AdversarialFeatureMemoryBank:
 
     def langevin_process_cat(self, model, x, y, num_iters):
 
-        eta = lambda t: 0.1 / (t + 1)
-
+        eta = lambda t: 0.5 / (t + 1)
+        for param in model.parameters():
+            param.requires_grad = False
         for t in range(num_iters):
             x.requires_grad = True
             x_cat = torch.cat([x, x], dim=-1)
+
             logits = model(x_cat)
             loss = F.cross_entropy(logits, y)
 
@@ -190,9 +196,14 @@ class AdversarialFeatureMemoryBank:
             with torch.no_grad():
                 noise = torch.randn_like(x)
                 ro = x.norm(p=2, dim=-1, keepdim=True) / (grad.norm(p=2, dim=-1, keepdim=True) + 1e-6)
-                x = x + grad * eta(t) * ro +   noise * torch.sqrt(
+                x = x + grad * eta(t) * ro + noise * torch.sqrt(
                     torch.tensor(2 * eta(t)))
-
+        for param in model.parameters():
+            param.requires_grad = True
+        for m in model.modules():
+            if isinstance(m, torch.nn.BatchNorm2d):
+                m.requires_grad_(False)
+                m.eval()
         return x
 
     def langevin_process2(self, model, x, y, num_iters, epoch):
@@ -281,7 +292,7 @@ class FeatureAugmentationNetwork(nn.Module):
         self.k_proj = nn.Linear(hidden_size, hidden_size)
         self.merge_coeff = merge_coeff
 
-    def forward(self, features, labels, memory_features, memory_labels, mixup_label,num_classses=2):
+    def forward(self, features, labels, memory_features, memory_labels, mixup_label, num_classses=2):
         tau = 1.0
         q = self.q_proj(features)
         k = self.k_proj(memory_features)
@@ -312,16 +323,20 @@ class FeatureAugmentationNetworkCat(nn.Module):
         self.hidden_size = hidden_size
         self.q_proj = nn.Linear(hidden_size, hidden_size)
         self.k_proj = nn.Linear(hidden_size, hidden_size)
+        self.v_proj = nn.Linear(hidden_size, hidden_size)
         self.merge_coeff = merge_coeff
 
-    def forward(self, features, labels, memory_features):
+    def forward(self, features, labels, memory_features, memory_lables):
         tau = 1.0
         q = self.q_proj(features)
-        k = self.q_proj(memory_features)
+        k = self.k_proj(memory_features)
         attn = torch.matmul(q, k.t())
         sqrt = torch.sqrt(torch.tensor(self.hidden_size, dtype=torch.float32))
         attn = torch.softmax(attn / sqrt, dim=-1)
-        augment_features = torch.matmul(attn, memory_features)
+        v = memory_features
+        augment_features = torch.matmul(attn, v)
+        # augment_features = F.normalize(augment_features, dim=-1)
+        # augment_features_ = augment_features / torch.norm(augment_features, dim=-1, keepdim=True)
         augmented_features = torch.cat([features, augment_features], dim=-1)
 
         augmented_labels = labels
@@ -355,7 +370,7 @@ class FeatureAugmentationNetwork2(nn.Module):
         return augmented_features
 
 
-def feature_augmentation(features, labels, memory_features, memory_labels, mixup_label,num_classes=2):
+def feature_augmentation(features, labels, memory_features, memory_labels, mixup_label, num_classes=2):
     tau = 0.01
     q = features
     k = memory_features
@@ -369,7 +384,8 @@ def feature_augmentation(features, labels, memory_features, memory_labels, mixup
     augmented_features = merge_coeff * features + (1 - merge_coeff) * augment_features
     if mixup_label:
         augment_labels = torch.matmul(attn.detach(), F.one_hot(memory_labels, num_classes=num_classes).float())
-        augmented_labels = merge_coeff * F.one_hot(labels, num_classes=num_classes).float() + (1 - merge_coeff) * augment_labels
+        augmented_labels = merge_coeff * F.one_hot(labels, num_classes=num_classes).float() + (
+                1 - merge_coeff) * augment_labels
     else:
         augmented_labels = labels
 

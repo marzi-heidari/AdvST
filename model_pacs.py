@@ -1,12 +1,10 @@
 from __future__ import print_function, absolute_import, division
 
-import random
 from copy import deepcopy
 
 import kornia
 import matplotlib.pyplot as plt
 import torch.nn as nn
-import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
 from torch.optim import lr_scheduler
@@ -26,13 +24,14 @@ from common.utils import (
 )
 from config import PACS_DATA_FOLDER
 from models.resnet_vanilla import resnet18
-from networks import AdversarialFeatureMemoryBank, FeatureAugmentationNetwork, FeatureAugmentationNetworkCat
+from networks import AdversarialFeatureMemoryBank, FeatureAugmentationNetworkCat
 
 
 # https://github.com/HAHA-DL/Episodic-DG
 def bn_eval(model):
     for m in model.modules():
         if isinstance(m, torch.nn.BatchNorm2d):
+            m.requires_grad_(False)
             m.eval()
 
 
@@ -420,10 +419,10 @@ class ModelBaseline(object):
     def configure(self, flags):
         for name, param in self.network.named_parameters():
             print(name, param.size())
+        param_group = [{'params': self.network.parameters(), 'lr': flags.lr}]
 
         self.optimizer = torch.optim.SGD(
-            self.network.parameters(),
-            lr=flags.lr,
+            param_group,
             weight_decay=flags.weight_decay,
             momentum=flags.momentum,
             nesterov=True,
@@ -719,7 +718,7 @@ class ModelADA(ModelBaseline):
 class ModelMemoey(ModelBaseline):
 
     def __init__(self, flags):
-        super(ModelMemoey, self).__init__(flags)
+
         self.args = flags
 
         if flags.seen_index == 2:
@@ -733,8 +732,9 @@ class ModelMemoey(ModelBaseline):
 
         self.device = torch.device(f"cuda:{flags.gpu}")
         self.adv_memory = AdversarialFeatureMemoryBank(memory_size=memory_size)
-        self.augment_net = FeatureAugmentationNetworkCat(512).to(self.device)
-
+        self.augment_net = FeatureAugmentationNetworkCat(128).to(self.device)
+        self.aug_optim = torch.optim.SGD(self.augment_net.parameters(), lr=flags.lr, momentum=0.9, weight_decay=1e-4)
+        super(ModelMemoey, self).__init__(flags)
 
     def setup_path(self, flags):
         root_folder = PACS_DATA_FOLDER
@@ -747,14 +747,13 @@ class ModelMemoey(ModelBaseline):
                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ]
         )
-        self.train_transform = transforms.Compose(
-            [
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ]
-        )
+        self.train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(.4, .4, .4, .4),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
         if not os.path.exists(flags.logs):
             os.makedirs(flags.logs)
 
@@ -790,8 +789,9 @@ class ModelMemoey(ModelBaseline):
             all_dataset.op_labels = torch.cat(
                 [all_dataset.op_labels, self.val_dataset.op_labels], 0
             )
+            all_dataset.train_transform=self.train_transform
             self.all_loader = DataLoader(
-                all_dataset, batch_size=flags.batch_size, num_workers=0, shuffle=False
+                all_dataset, batch_size=flags.batch_size, num_workers=0, shuffle=True
             )
             self.test_loaders = []
             for index, name in enumerate(dataset_names):
@@ -833,14 +833,12 @@ class ModelMemoey(ModelBaseline):
             [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
         )
 
-
         self.scheduler = lr_scheduler.MultiStepLR(
             optimizer=self.optimizer, milestones=[30], gamma=0.1
         )
 
     def save_model(self, file_name, flags):
         outfile = os.path.join(flags.model_path, file_name)
-
 
         torch.save(
             {"state": self.network.state_dict(), "args": flags},
@@ -861,28 +859,30 @@ class ModelMemoey(ModelBaseline):
         flags_log = os.path.join(flags.logs, "loss_log.txt")
         if not os.path.exists(flags.model_path):
             os.makedirs(flags.model_path)
-        train_dataset = deepcopy(self.train_dataset)
-        data_pool = DataPool(flags.k + 1)
-        data_pool.add((train_dataset.x, train_dataset.y, train_dataset.op_labels))
+        # train_dataset = deepcopy(self.train_dataset)
+        # data_pool = DataPool(flags.k + 1)
+        # data_pool.add((train_dataset.x, train_dataset.y, train_dataset.op_labels))
 
         # train_dataset.transform = self.train_transform
+
         train_loader = DataLoader(
-            train_dataset,
+            self.train_dataset,
             batch_size=flags.batch_size,
             num_workers=flags.num_workers,
             shuffle=True
             # sampler=RandomSampler(train_dataset, True,flags.loops_min*flags.batch_size)
         )
         counter_ite = 0
-        self.adv_memory.init_memory_bank(self.network, train_loader, self.device)
+        self.adv_memory.init_memory_bank(model=self.network, trainloader=train_loader, device=self.device,
+                                         num_classes=self.args.num_classes)
         for epoch in range(1, flags.train_epochs + 1):
             loss_avger = Averager()
             cls_loss_avger = Averager()
             con_loss_avger = Averager()
 
             for ite, (images_train, labels_train, op_labels) in tqdm(
-                    enumerate(train_loader, start=1),
-                    total=len(train_loader),
+                    enumerate(self.all_loader, start=1),
+                    total=len(self.all_loader),
                     leave=False,
                     desc="train-epoch{}".format(epoch),
             ):
@@ -898,30 +898,35 @@ class ModelMemoey(ModelBaseline):
                 cls_loss = cls_loss_ele.mean()
 
                 cls_loss_avger.add(cls_loss.item())
+                if epoch > 3:
+                    memory_features, memory_labels = self.adv_memory.memory_bank
 
-                memory_features, memory_labels = self.adv_memory.memory_bank
+                    if self.args.augment_encoder:
+                        features_aug, labels_aug = self.augment_net(features, labels, memory_features.detach(),
+                                                                    memory_labels)
+                        # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
+                    else:
+                        features_aug, labels_aug = self.augment_net(features.detach(), labels, memory_features.detach(),
+                                                                    memory_labels)
+                        # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
 
-                if self.args.augment_encoder:
-                    features_aug, labels_aug = self.augment_net(features, labels, memory_features.detach(),
-                                                                self.args.mixup_label)
-                    # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
+                    logits_aug = self.network.fc(features_aug)
+                    if self.args.mixup_label:
+                        loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
+                    else:
+                        loss_aug = F.cross_entropy(logits_aug, labels_aug)
+
+                    loss = loss_aug + cls_loss
                 else:
-                    features_aug, labels_aug = self.augment_net(features, labels, memory_features.detach())
-                    # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
-
-                logits_aug = self.network.fc(features_aug)
-                if self.args.mixup_label:
-                    loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
-                else:
-                    loss_aug = F.cross_entropy(logits_aug, labels_aug)
-                # if epoch == 0:
-                #     loss = loss_cls
-                # else:
-                loss = cls_loss + loss_aug * self.args.tradeoff_aug_loss
+                    loss = cls_loss
+                self.aug_optim.zero_grad()
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
+                if epoch > 3:
+                    self.aug_optim.step()
                 loss_avger.add(loss.item())
+                self.adv_memory.update_memory_bank_cat(self.network.fc, features.detach(), labels)
 
             self.scheduler.step()
 
