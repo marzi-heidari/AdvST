@@ -63,7 +63,7 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AvgPool2d(7, stride=1)
-        self.fc = nn.Linear(128 * 2, num_classes)
+        self.fc = nn.Linear(512 * 2, num_classes)
         self.pro_head = nn.Linear(512 * block.expansion, 128)
 
         if 'contrastive' in contrastive:
@@ -81,7 +81,9 @@ class ResNet(nn.Module):
 
     def get_proj(self, fea):
         z = self.pro_head(fea)
-        # z = F.normalize(z, dim=-1)
+        # z = self.pro_head(fea)
+        # z = F.normalize(z
+        # , dim=-1)
         return z
 
     def bn_eval(self):
@@ -121,7 +123,7 @@ class ResNet(nn.Module):
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-        x= self.get_proj(x)
+        # x = self.get_proj(x)
 
         end_points['Embedding'] = x
 

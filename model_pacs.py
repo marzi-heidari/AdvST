@@ -1,5 +1,6 @@
 from __future__ import print_function, absolute_import, division
 
+import copy
 from copy import deepcopy
 
 import kornia
@@ -11,6 +12,7 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from common.autoaugment import ImageNetPolicy
 from common.contrastive import SupConLoss
 from common.pacs import PACS, PACSMultiple, Denormalise
 from common.utils import *
@@ -31,7 +33,7 @@ from networks import AdversarialFeatureMemoryBank, FeatureAugmentationNetworkCat
 def bn_eval(model):
     for m in model.modules():
         if isinstance(m, torch.nn.BatchNorm2d):
-            m.requires_grad_(False)
+            # m.requires_grad_(False)
             m.eval()
 
 
@@ -419,7 +421,8 @@ class ModelBaseline(object):
     def configure(self, flags):
         for name, param in self.network.named_parameters():
             print(name, param.size())
-        param_group = [{'params': self.network.parameters(), 'lr': flags.lr}]
+        param_group = [{'params': self.network.parameters(), 'lr': flags.lr},
+                       {'params': self.augment_net.parameters(), 'lr': flags.lr}]
 
         self.optimizer = torch.optim.SGD(
             param_group,
@@ -528,15 +531,17 @@ class ModelBaseline(object):
     def batch_test(self, ood_loader):
         # switch on the network test mode
         self.network.eval()
+        self.augment_net.eval()
         test_image_preds = []
         test_labels = []
         with torch.no_grad():
+            memory_features, _ = self.adv_memory.memory_bank
             for images_test, labels_test, _ in ood_loader:
                 images_test, labels_test = images_test.cuda(), labels_test.cuda()
 
                 out, end_points = self.network(images_test)
-
-                predictions = end_points["Predictions"]
+                features_aug = self.augment_net(end_points['Embedding'], memory_features)
+                predictions = self.network.fc(features_aug)
                 predictions = predictions.cpu().data.numpy()
                 test_image_preds.append(predictions)
                 test_labels.append(labels_test.cpu().data.numpy())
@@ -732,8 +737,8 @@ class ModelMemoey(ModelBaseline):
 
         self.device = torch.device(f"cuda:{flags.gpu}")
         self.adv_memory = AdversarialFeatureMemoryBank(memory_size=memory_size)
-        self.augment_net = FeatureAugmentationNetworkCat(128).to(self.device)
-        self.aug_optim = torch.optim.SGD(self.augment_net.parameters(), lr=flags.lr, momentum=0.9, weight_decay=1e-4)
+        self.augment_net = FeatureAugmentationNetworkCat(512).to(self.device)
+        # self.aug_optim = torch.optim.SGD(self.augment_net.parameters(), lr=flags.lr, momentum=0.9, weight_decay=1e-4)
         super(ModelMemoey, self).__init__(flags)
 
     def setup_path(self, flags):
@@ -749,8 +754,7 @@ class ModelMemoey(ModelBaseline):
         )
         self.train_transform = transforms.Compose([
             transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(.4, .4, .4, .4),
+            ImageNetPolicy(),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
@@ -789,10 +793,13 @@ class ModelMemoey(ModelBaseline):
             all_dataset.op_labels = torch.cat(
                 [all_dataset.op_labels, self.val_dataset.op_labels], 0
             )
-            all_dataset.train_transform=self.train_transform
+            # all_dataset.train_transform = self.train_transform
             self.all_loader = DataLoader(
                 all_dataset, batch_size=flags.batch_size, num_workers=0, shuffle=True
             )
+            all_dataset.transform = self.train_transform
+            all_dataset.train_transform = self.train_transform
+            self.val_dataset = copy.deepcopy(all_dataset)
             self.test_loaders = []
             for index, name in enumerate(dataset_names):
                 if index != seen_index:
@@ -807,6 +814,8 @@ class ModelMemoey(ModelBaseline):
 
                     self.test_loaders.append((name, loader))
 
+        self.train_dataset.transform = self.preprocess
+        self.train_dataset.train_transform = self.preprocess
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=flags.batch_size,
@@ -814,6 +823,9 @@ class ModelMemoey(ModelBaseline):
             num_workers=flags.num_workers,
             pin_memory=False,
         )
+        self.val_dataset.train_transform = self.preprocess
+        self.val_dataset.transform = self.preprocess
+
         self.val_loader = DataLoader(
             self.val_dataset,
             batch_size=flags.batch_size,
@@ -825,7 +837,7 @@ class ModelMemoey(ModelBaseline):
     def configure(self, flags):
         super(ModelMemoey, self).configure(flags)
         self.dist_fn = torch.nn.MSELoss()
-        self.conloss = SupConLoss()
+        self.conloss = SupConLoss(),
         self.mean = torch.tensor([0.485, 0.456, 0.406])
         self.std = torch.tensor([0.229, 0.224, 0.225])
         self.image_transform = transforms.ToPILImage()
@@ -865,15 +877,15 @@ class ModelMemoey(ModelBaseline):
 
         # train_dataset.transform = self.train_transform
 
-        train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=flags.batch_size,
-            num_workers=flags.num_workers,
-            shuffle=True
-            # sampler=RandomSampler(train_dataset, True,flags.loops_min*flags.batch_size)
-        )
+        # train_loader = DataLoader(
+        #     self.train_dataset,
+        #     batch_size=flags.batch_size,
+        #     num_workers=flags.num_workers,
+        #     shuffle=False
+        #     # sampler=RandomSampler(train_dataset, True,flags.loops_min*flags.batch_size)
+        # )
         counter_ite = 0
-        self.adv_memory.init_memory_bank(model=self.network, trainloader=train_loader, device=self.device,
+        self.adv_memory.init_memory_bank(model=self.network, trainloader=self.train_loader, device=self.device,
                                          num_classes=self.args.num_classes)
         for epoch in range(1, flags.train_epochs + 1):
             loss_avger = Averager()
@@ -902,31 +914,86 @@ class ModelMemoey(ModelBaseline):
                     memory_features, memory_labels = self.adv_memory.memory_bank
 
                     if self.args.augment_encoder:
-                        features_aug, labels_aug = self.augment_net(features, labels, memory_features.detach(),
-                                                                    memory_labels)
+                        features_aug, labels_aug = self.augment_net(features, memory_features.detach(), labels,
+                                                                    memory_labels, self.device)
                         # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
                     else:
-                        features_aug, labels_aug = self.augment_net(features.detach(), labels, memory_features.detach(),
-                                                                    memory_labels)
+                        features_aug, labels_aug = self.augment_net(features.detach(), memory_features.detach(), labels,
+                                                                    memory_labels, self.device)
+                        # feat_only_aug, labels_only_aug = self.augment_net.get_only_aug(features.detach(),
+                        #                                                                memory_features.detach(), labels,
+                        #                                                                memory_labels, self.device)
                         # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
 
                     logits_aug = self.network.fc(features_aug)
+                    # logits_aug1 = self.network.fc(feat_only_aug)
                     if self.args.mixup_label:
                         loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
                     else:
                         loss_aug = F.cross_entropy(logits_aug, labels_aug)
 
                     loss = loss_aug + cls_loss
+
                 else:
+
                     loss = cls_loss
-                self.aug_optim.zero_grad()
+                # self.aug_optim.zero_grad()
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                if epoch > 3:
-                    self.aug_optim.step()
+                # outputs, tuples = self.network(x=inputs.reshape(-1, *img_shape))
+                # features = tuples["Embedding"]
+                #
+                # cls_loss_ele = self.loss_per_ele(outputs, labels.reshape(-1))
+                # cls_loss = cls_loss_ele.mean()
+                #
+                # cls_loss_avger.add(cls_loss.item())
+                # if epoch > 3:
+                #     memory_features, memory_labels = self.adv_memory.memory_bank
+                #
+                #     if self.args.augment_encoder:
+                #         features_aug, labels_aug = self.augment_net(features, memory_features.detach(), labels,
+                #                                                     memory_labels, self.device)
+                #         # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
+                #     else:
+                #         features_aug = self.augment_net(features.detach(), memory_features.detach(),
+                #                                         device=self.device)
+                #         # feat_only_aug, labels_only_aug = self.augment_net.get_only_aug(features.detach(),
+                #         #                                                                memory_features.detach(), labels,
+                #         #                                                                memory_labels, self.device)
+                #         # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
+                #
+                #     logits_aug = self.network.fc(features_aug)
+                #     # logits_aug1 = self.network.fc(feat_only_aug)
+                #     if self.args.mixup_label:
+                #         loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
+                #     else:
+                #         soft_labels = F.softmax(logits_aug, dim=-1)
+                #         if ite == 1:
+                #             self.pseudo = soft_labels.detach()
+                #             loss_aug = 0
+                #         else:
+                #             try:
+                #                 self.pseudo = 0.5 * self.pseudo + 0.5 * soft_labels.detach()
+                #                 loss_aug = F.cross_entropy(logits_aug, self.pseudo)
+                #             except:
+                #                 print('size mismatch')
+                #                 loss_aug = 0
+                #
+                #     loss = loss_aug + cls_loss
+                #
+                # else:
+                #
+                #     loss = cls_loss
+                # # self.aug_optim.zero_grad()
+                # self.optimizer.zero_grad()
+                # loss.backward()
+                # self.optimizer.step()
+
                 loss_avger.add(loss.item())
-                self.adv_memory.update_memory_bank_cat(self.network.fc, features.detach(), labels)
+            self.adv_memory.update_memory_bank_cat(model=self.network, trainloader=self.train_loader,
+                                                   device=self.device,
+                                                   num_classes=self.args.num_classes, epoch=epoch)
 
             self.scheduler.step()
 
@@ -972,7 +1039,7 @@ class ModelADASemantics(ModelBaseline):
             [
                 transforms.Resize(224),
                 transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ]
         )
         self.train_transform = transforms.Compose(
@@ -1034,7 +1101,8 @@ class ModelADASemantics(ModelBaseline):
                     )
 
                     self.test_loaders.append((name, loader))
-
+        self.train_dataset.transform = self.train_transform
+        self.train_dataset.train_transform = self.train_transform
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=flags.batch_size,
@@ -1185,7 +1253,7 @@ class ModelADASemantics(ModelBaseline):
         data_pool = DataPool(flags.k + 1)
         data_pool.add((train_dataset.x, train_dataset.y, train_dataset.op_labels))
 
-        # train_dataset.transform = self.train_transform
+        train_dataset.transform = self.train_transform
         train_loader = DataLoader(
             train_dataset,
             batch_size=flags.batch_size,

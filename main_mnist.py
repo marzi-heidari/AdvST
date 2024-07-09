@@ -2,8 +2,7 @@ from __future__ import print_function, absolute_import
 
 import argparse
 import os
-from model_mnist import ModelBaseline, ModelADA, ModelADASemantics
-
+from model_mnist import ModelBaseline, ModelADA, ModelADASemantics, ModelMemory
 
 from common.utils import time_str, Timer, set_gpu
 from test_models import main as eval_models
@@ -25,6 +24,9 @@ def main(args):
         model_obj = ModelADA(flags=args)
     elif args.algorithm == "AdvST":
         model_obj = ModelADASemantics(flags=args)
+    elif args.algorithm == "memory-cat":
+        model_obj = ModelMemory(flags=args)
+
     else:
         raise RuntimeError
 

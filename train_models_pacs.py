@@ -14,7 +14,7 @@ def main(args):
     # For experiments on AdvST/AdvST-ME
     pacs_AdvST_args = Namespace(
         seed=args.seed,
-        augment_encoder=True,
+        augment_encoder=False,
         algorithm="memory-cat",  # ERM, ADA, AdvST
         model="resnet18",
         batch_size=32,

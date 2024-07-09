@@ -36,6 +36,7 @@ from tqdm import tqdm
 from copy import deepcopy
 import kornia
 from config import DIGITS_DATA_FOLDER
+from networks import AdversarialFeatureMemoryBank, FeatureAugmentationNetworkCat
 
 
 def rand_bbox(size, lam=0.5):
@@ -79,7 +80,7 @@ class DataPool:
         if self.num == 0:
             return []
         if num < 0:
-            return self.data[0 : self.num]
+            return self.data[0: self.num]
         else:
             num = min(num, self.num)
             indexes = list(range(self.num))
@@ -297,14 +298,14 @@ class ModelBaseline(object):
         self.configure(flags)
 
     def get_images(
-        self,
-        images,
-        labels,
-        save_path,
-        shuffle=False,
-        sel_indexes=None,
-        nsamples=10,
-        row_wise=True,
+            self,
+            images,
+            labels,
+            save_path,
+            shuffle=False,
+            sel_indexes=None,
+            nsamples=10,
+            row_wise=True,
     ):
         class_dict = {}
         for i, l in enumerate(labels):
@@ -370,9 +371,9 @@ class ModelBaseline(object):
 
         print(self.network)
         flag_str = (
-            "--------Parameters--------\n"
-            + "\n".join(["{}={}".format(k, flags.__dict__[k]) for k in flags.__dict__])
-            + "\n--------------------"
+                "--------Parameters--------\n"
+                + "\n".join(["{}={}".format(k, flags.__dict__[k]) for k in flags.__dict__])
+                + "\n--------------------"
         )
         print("flags:", flag_str)
         if not os.path.exists(flags.logs):
@@ -464,7 +465,7 @@ class ModelBaseline(object):
             os.makedirs(flags.model_path)
         for epoch in range(1, flags.train_epochs + 1):
             for ite, (images_train, labels_train, _) in enumerate(
-                self.train_loader, start=1
+                    self.train_loader, start=1
             ):
                 inputs, labels = images_train.cuda(), labels_train.cuda()
                 self.network.train()
@@ -536,6 +537,161 @@ class ModelBaseline(object):
             accuracies.append(accuracy_test)
 
         return accuracies
+
+
+class ModelMemory(ModelBaseline):
+    def __init__(self, flags):
+
+        self.args = flags
+        memory_size = 1000
+
+        self.device = torch.device(f"cuda:{flags.gpu}")
+        self.adv_memory = AdversarialFeatureMemoryBank(memory_size=memory_size)
+        self.augment_net = FeatureAugmentationNetworkCat(1024).to(self.device)
+        self.aug_optim = torch.optim.SGD(self.augment_net.parameters(), lr=flags.lr, momentum=0.9, weight_decay=1e-4)
+        super(ModelMemory, self).__init__(flags)
+
+    def configure(self, flags):
+        super(ModelMemory, self).configure(flags)
+        self.dist_fn = torch.nn.MSELoss()
+        self.conloss = SupConLoss()
+
+        if getattr(flags, "chkpt_path", None):
+            self.load_model(flags)
+
+    def save_model(self, file_name, flags):
+        outfile = os.path.join(flags.model_path, file_name)
+        aug_probs = [
+            (
+                "-".join(
+                    [
+                        self.semantic_config.semantic_aug_list[o][0].__name__
+                        for o in self.semantic_config.ops[i]
+                    ]
+                ),
+                self.semantic_config.probs[i],
+            )
+            for i in range(len(self.semantic_config.ops))
+        ]
+        torch.save(
+            {"state": self.network.state_dict(), "args": flags, "aug_probs": aug_probs},
+            outfile,
+        )
+
+    def load_model(self, flags):
+        print("Load model from ", flags.chkpt_path)
+        model_dict = torch.load(flags.chkpt_path)
+
+        self.network.load_state_dict(model_dict["state"])
+
+    def train(self, flags):
+        counter_k = 0
+        best_val_acc = 0
+        best_test_acc = 0
+        flags_log = os.path.join(flags.logs, "loss_log.txt")
+        if not os.path.exists(flags.model_path):
+            os.makedirs(flags.model_path)
+        # train_dataset = deepcopy(self.train_dataset)
+        # data_pool = DataPool(flags.k + 1)
+        # data_pool.add((train_dataset.x, train_dataset.y, train_dataset.op_labels))
+
+        # train_dataset.transform = self.train_transform
+
+        # train_loader = DataLoader(
+        #     self.train_dataset,
+        #     batch_size=flags.batch_size,
+        #     num_workers=flags.num_workers,
+        #     shuffle=False
+        #     # sampler=RandomSampler(train_dataset, True,flags.loops_min*flags.batch_size)
+        # )
+        counter_ite = 0
+        self.adv_memory.init_memory_bank(model=self.network, trainloader=self.train_loader, device=self.device,
+                                         num_classes=self.args.num_classes)
+        for epoch in range(1, flags.train_epochs + 1):
+            loss_avger = Averager()
+            cls_loss_avger = Averager()
+            con_loss_avger = Averager()
+
+            for ite, (images_train, labels_train, op_labels) in tqdm(
+                    enumerate(self.train_loader, start=1),
+                    total=len(self.train_loader),
+                    leave=False,
+                    desc="train-epoch{}".format(epoch),
+            ):
+                self.network.train()
+
+                counter_ite += 1
+                inputs, labels = images_train.cuda(), labels_train.cuda()
+                img_shape = inputs.shape[-3:]
+                outputs, tuples = self.network(x=inputs.reshape(-1, *img_shape))
+                features = tuples["Embedding"]
+
+                cls_loss_ele = self.loss_per_ele(outputs, labels.reshape(-1))
+                cls_loss = cls_loss_ele.mean()
+
+                cls_loss_avger.add(cls_loss.item())
+                if epoch > 3:
+                    memory_features, memory_labels = self.adv_memory.memory_bank
+
+                    if self.args.augment_encoder:
+                        features_aug, labels_aug = self.augment_net(features, memory_features.detach(), labels,
+                                                                    memory_labels, self.device)
+                        # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
+                    else:
+                        features_aug, labels_aug = self.augment_net(features.detach(), memory_features.detach(), labels,
+                                                                    memory_labels, self.device)
+                        # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
+
+                    logits_aug = self.network.fc(features_aug)
+                    if self.args.mixup_label:
+                        loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
+                    else:
+                        loss_aug = F.cross_entropy(logits_aug, labels_aug)
+
+                    loss = loss_aug + cls_loss
+                    print('here')
+                else:
+                    loss = cls_loss
+                    print('here1')
+                self.aug_optim.zero_grad()
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                if epoch > 3:
+                    self.aug_optim.step()
+                loss_avger.add(loss.item())
+            # self.adv_memory.init_memory_bank(model=self.network, trainloader=self.all_loader, device=self.device,
+            #                                  num_classes=self.args.num_classes, epoch=epoch)
+
+            self.scheduler.step()
+        val_acc = self.batch_test(self.all_loader)
+        acc_arr = self.batch_test_workflow()
+        mean_acc = np.array(acc_arr).mean()
+        names = [n for n, _ in self.test_loaders]
+        res = (
+                "\n{} ".format(self.train_name)
+                + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
+                + " Mean:{:.6f}".format(mean_acc)
+        )
+        msg = "[{}] train_loss:{:.4f} cls:{:.4f} con:{:.4f} lr:{:.4f} val_acc:{:.4f}".format(
+            epoch,
+            loss_avger.item(),
+            cls_loss_avger.item(),
+            con_loss_avger.item(),
+            self.scheduler.get_last_lr()[0],
+            val_acc,
+        )
+
+        if best_test_acc < mean_acc:
+            best_test_acc = mean_acc
+            self.save_model("best_test_model.tar", flags)
+        if best_val_acc < val_acc:
+            best_val_acc = val_acc
+            msg += " (best)"
+            self.save_model("best_model.tar", flags)
+        msg += res
+        print(msg)
+        write_log(msg, flags_log)
 
 
 class ModelADASemantics(ModelBaseline):
@@ -617,9 +773,9 @@ class ModelADASemantics(ModelBaseline):
 
                     semantic_loss = self.dist_fn(tuples["Embedding"], inputs_embedding)
                     loss = (
-                        cls_loss
-                        - flags.gamma * semantic_loss
-                        + flags.eta * entropy_loss(out)
+                            cls_loss
+                            - flags.gamma * semantic_loss
+                            + flags.eta * entropy_loss(out)
                     )
 
                     # init the grad to zeros first
@@ -670,7 +826,7 @@ class ModelADASemantics(ModelBaseline):
             con_loss_avger = Averager()
             train_acc_avger = Averager()
             for ite, (images_train, labels_train, op_labels) in enumerate(
-                train_loader, start=1
+                    train_loader, start=1
             ):
                 self.network.train()
 
@@ -693,9 +849,9 @@ class ModelADASemantics(ModelBaseline):
                     con_loss = self.conloss(projs, labels)
                     con_loss_avger.add(con_loss.item())
                     loss = (
-                        cls_loss
-                        + flags.beta * con_loss
-                        - flags.eta_min * entropy_loss(outputs)
+                            cls_loss
+                            + flags.beta * con_loss
+                            - flags.eta_min * entropy_loss(outputs)
                     )
                 else:
                     loss = cls_loss - flags.eta_min * entropy_loss(outputs)
@@ -708,7 +864,7 @@ class ModelADASemantics(ModelBaseline):
                 loss_avger.add(loss.item())
 
             if (
-                epoch % flags.gen_freq == 0 and counter_k < flags.domain_number
+                    epoch % flags.gen_freq == 0 and counter_k < flags.domain_number
             ):  # if T_min iterations are passed
                 print("Semantic image generation [iter {}]".format(counter_k))
 
@@ -808,9 +964,9 @@ class ModelADA(ModelBaseline):
                     # loss
                     semantic_dist = self.dist_fn(tuples["Embedding"], inputs_embedding)
                     loss = (
-                        loss
-                        - flags.gamma * semantic_dist
-                        + flags.eta * entropy_loss(out)
+                            loss
+                            - flags.gamma * semantic_dist
+                            + flags.eta * entropy_loss(out)
                     )
 
                     # init the grad to zeros first
@@ -851,7 +1007,7 @@ class ModelADA(ModelBaseline):
 
         for epoch in range(1, flags.train_epochs + 1):
             for ite, (images_train, labels_train, _) in enumerate(
-                train_loader, start=1
+                    train_loader, start=1
             ):
                 self.network.train()
                 inputs, labels = images_train.cuda(), labels_train.cuda()

@@ -1,11 +1,10 @@
 # import pandas as pd
-
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.cluster import k_means
-from torch.nn.functional import one_hot
 from transformers import RobertaModel
 
 
@@ -82,7 +81,7 @@ class AdversarialFeatureMemoryBank:
         self.memory_size = memory_size
         self.memory_bank = None
 
-    def init_memory_bank(self, model, trainloader, device, n_clusters=10, num_classes=2):
+    def init_memory_bank(self, model, trainloader, device, n_clusters=10, num_classes=2, epoch=1):
         model.eval()
 
         all_features = []
@@ -90,6 +89,7 @@ class AdversarialFeatureMemoryBank:
         with torch.no_grad():
             for encoded_inputs, labels, _ in trainloader:
                 encoded_inputs, labels = encoded_inputs.to(device), labels.to(device)
+                # noisy_input = encoded_inputs + torch.randn_like(encoded_inputs) * 0.0001
                 _, output = model(encoded_inputs)
                 features = output['Embedding']
                 all_features.append(features)
@@ -108,29 +108,54 @@ class AdversarialFeatureMemoryBank:
             selected_indices = []
             for i in range(n_clusters):
                 indices_i = np.where(cluster_label == i)[0]
-                selected_indices.append(np.random.choice(indices_i, sample_per_cluster[i], replace=False))
+                selected_indices.append(np.random.choice(indices_i, sample_per_cluster[i], replace=True))
 
             selected_indices = np.concatenate(selected_indices)
             feats = all_features[selected_indices]
             lbs = all_labels[selected_indices]
-        adv_feats = self.langevin_process_cat(model.fc, feats, lbs, num_iters=5)
+        adv_feats = self.langevin_process_cat(model.fc, feats, lbs, num_iters=5, epoch=epoch)
+        model.train()
         # adv_feats_ = adv_feats / torch.norm(adv_feats, dim=-1, keepdim=True)
         self.memory_bank = (adv_feats, lbs)
 
-    def update_memory_bank_cat(self, classifier, features, labels, num_iters=5, device='cuda'):
-        adv_features = self.langevin_process_cat(classifier, features, labels, num_iters)
-        # adv_features = adv_features_ / torch.norm(adv_features_, dim=-1, keepdim=True)
+    def update_memory_bank_cat(self, model, trainloader, device, n_clusters=10, num_classes=2, epoch=1):
+        model.eval()
 
-        memory_features, memory_labels = self.memory_bank
+        all_features = []
+        all_labels = []
         with torch.no_grad():
-            logits = classifier(torch.cat([memory_features, memory_features], dim=-1))
+            for encoded_inputs, labels, _ in trainloader:
+                encoded_inputs, labels = encoded_inputs.to(device), labels.to(device)
+                # noisy_input = encoded_inputs + torch.randn_like(encoded_inputs) * 0.001
+                _, output = model(encoded_inputs)
+                features = output['Embedding']
+                all_features.append(features)
+                all_labels.append(labels)
+
+            all_features = torch.cat(all_features, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
+
+            update_rate = 0.7
+            selected_indices = np.random.choice(range(self.memory_size), size=int(self.memory_size * update_rate),
+                                                replace=False)
+
+            feats = all_features[selected_indices]
+            lbs = all_labels[selected_indices]
+        adv_feats = self.langevin_process_cat(model.fc, feats, lbs, num_iters=5, epoch=epoch)
+        memory_features, memory_labels = self.memory_bank
+        model.train()
+        # adv_feats_ = adv_feats / torch.norm(adv_feats, dim=-1, keepdim=True)
+        with torch.no_grad():
+            mem_cat = torch.cat([memory_features, memory_features], dim=-1)
+            logits = model.fc(mem_cat)
+
             probs = F.softmax(logits, dim=-1)
             entropy = - torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
 
-            _, indices = torch.topk(entropy, k=features.size(0), largest=False)
+            _, indices = torch.topk(entropy, k=int(self.memory_size * update_rate), largest=False)
 
-            memory_features[indices] = adv_features
-            memory_labels[indices] = labels
+            memory_features[indices] = adv_feats
+            memory_labels[indices] = lbs
 
     def update_memory_bank(self, classifier, features, labels, epoch, num_iters=5):
         adv_features = self.langevin_process(classifier, features, labels, num_iters, epoch)
@@ -147,7 +172,7 @@ class AdversarialFeatureMemoryBank:
             memory_labels[indices] = labels
 
     def langevin_process(self, model, x, y, num_iters, epoch):
-        eta = lambda t: 10 / (t + 1)
+        eta = lambda t: epoch * 10 / (t + 1)
 
         for t in range(num_iters):
             x.requires_grad = True
@@ -170,12 +195,13 @@ class AdversarialFeatureMemoryBank:
 
         return x
 
-    def langevin_process_cat(self, model, x, y, num_iters):
+    def langevin_process_cat(self, model, x, y, num_iters, epoch):
 
-        eta = lambda t: 0.5 / (t + 1)
+        eta = lambda t: math.log(epoch) * 0.1 / (t + 1)
         for param in model.parameters():
             param.requires_grad = False
         for t in range(num_iters):
+            # x = x.detach()
             x.requires_grad = True
             x_cat = torch.cat([x, x], dim=-1)
 
@@ -202,7 +228,7 @@ class AdversarialFeatureMemoryBank:
             param.requires_grad = True
         for m in model.modules():
             if isinstance(m, torch.nn.BatchNorm2d):
-                m.requires_grad_(False)
+                # m.requires_grad_(False)
                 m.eval()
         return x
 
@@ -292,7 +318,7 @@ class FeatureAugmentationNetwork(nn.Module):
         self.k_proj = nn.Linear(hidden_size, hidden_size)
         self.merge_coeff = merge_coeff
 
-    def forward(self, features, labels, memory_features, memory_labels, mixup_label, num_classses=2):
+    def forward(self, features, memory_features, labels=None, memory_labels=None, num_classses=2):
         tau = 1.0
         q = self.q_proj(features)
         k = self.k_proj(memory_features)
@@ -326,10 +352,34 @@ class FeatureAugmentationNetworkCat(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size)
         self.merge_coeff = merge_coeff
 
-    def forward(self, features, labels, memory_features, memory_lables):
+    def forward(self, features, memory_features, labels=None, memory_lables=None, device=None):
         tau = 1.0
         q = self.q_proj(features)
         k = self.k_proj(memory_features)
+        # q = features
+        # k = memory_features
+        attn = torch.matmul(q, k.t())
+        sqrt = torch.sqrt(torch.tensor(self.hidden_size, dtype=torch.float32))
+        attn = torch.softmax(attn/sqrt, dim=-1)
+        v = memory_features
+        augment_features = torch.matmul(attn, v)
+        # augment_features = F.normalize(augment_features, dim=-1)
+        # augment_features_ = augment_features / torch.norm(augment_features, dim=-1, keepdim=True)
+        augmented_features = torch.cat([features, augment_features], dim=-1)
+        if labels is None:
+            return augmented_features
+        one_hot = F.one_hot(memory_lables, num_classes=7).float()
+        one_hot_o = F.one_hot(labels, num_classes=7).float()
+        # augmented_labels = 0.5 * torch.matmul(attn, one_hot) + one_hot_o * 0.5
+        # augmented_labels = augmented_labels.to(device)
+        augmented_labels = one_hot_o
+
+        return augmented_features, augmented_labels
+
+    def get_only_aug(self, features, memory_features, labels=None, memory_lables=None, device=None):
+        tau = 1.0
+        q = self.q_proj(features)
+        k = self.q_proj(memory_features)
         attn = torch.matmul(q, k.t())
         sqrt = torch.sqrt(torch.tensor(self.hidden_size, dtype=torch.float32))
         attn = torch.softmax(attn / sqrt, dim=-1)
@@ -337,9 +387,14 @@ class FeatureAugmentationNetworkCat(nn.Module):
         augment_features = torch.matmul(attn, v)
         # augment_features = F.normalize(augment_features, dim=-1)
         # augment_features_ = augment_features / torch.norm(augment_features, dim=-1, keepdim=True)
-        augmented_features = torch.cat([features, augment_features], dim=-1)
-
-        augmented_labels = labels
+        augmented_features = torch.cat([augment_features, augment_features], dim=-1)
+        if labels is None:
+            return augmented_features
+        one_hot = F.one_hot(memory_lables, num_classes=7).float()
+        one_hot_o = F.one_hot(labels, num_classes=7).float()
+        augmented_labels = torch.matmul(attn, one_hot)
+        # augmented_labels = augmented_labels.to(device)
+        # augmented_labels = one_hot_o
 
         return augmented_features, augmented_labels
 

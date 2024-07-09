@@ -1,9 +1,12 @@
 from __future__ import absolute_import, division
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from collections import OrderedDict
+
+
 class LeNet5(nn.Module):
 
     def __init__(self, num_classes, contrastive=False):
@@ -13,7 +16,7 @@ class LeNet5(nn.Module):
         self.conv2 = nn.Conv2d(64, 128, kernel_size=5)
         self.fc1 = nn.Linear(128 * 5 * 5, 1024)
         self.fc2 = nn.Linear(1024, 1024)
-        self.linear = nn.Linear(1024, num_classes)
+        self.fc = nn.Linear(1024 * 2, num_classes)
         if 'contrastive' in contrastive:
             self.pro_head = nn.Linear(1024, 128)
             self.contrastive = True
@@ -22,9 +25,10 @@ class LeNet5(nn.Module):
 
     def get_proj(self, fea):
         z = self.pro_head(fea)
-        z = F.normalize(z,dim=-1)
+        z = F.normalize(z, dim=-1)
         return z
-    def forward(self, x, more=False):
+
+    def forward(self, x, more=True):
         end_points = {}
 
         x = F.relu(self.conv1(x))
@@ -32,19 +36,16 @@ class LeNet5(nn.Module):
         x = F.relu(self.conv2(x))
         x = F.max_pool2d(x, 2)
         x = x.reshape(x.size(0), -1)
-        
 
-        
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
 
-        
         end_points['Embedding'] = x
         if self.contrastive:
             end_points['Projection'] = self.get_proj(x)
-   
-        x = self.linear(x)
-       
+        x = torch.cat([x, x], -1)
+        x = self.fc(x)
+
         end_points['Predictions'] = F.softmax(input=x, dim=-1)
         self.end_points = end_points
         if more:

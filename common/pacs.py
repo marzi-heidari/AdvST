@@ -31,13 +31,13 @@ class Denormalise(transforms.Normalize):
 
 class PACS(Dataset):
     def __init__(self, root_folder, name, split='train', transform=None, ratio=None):
-        path = os.path.join(root_folder, '{}_{}.hdf5'.format(name,split))
+        path = os.path.join(root_folder, '{}_{}.hdf5'.format(name, split))
         if split == 'train':
             if transform is None:
                 self.transform = transforms.Compose([
                     transforms.Resize(224),
                     transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                    # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
                 ])
             else:
                 self.transform = transform
@@ -54,7 +54,7 @@ class PACS(Dataset):
         f = h5py.File(path, "r")
         self.x = np.array(f['images'])
         self.y = np.array(f['labels'])
-        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int_)*(-1))
+        self.op_labels = torch.tensor(np.ones(len(self.y), dtype=np.int_) * (-1))
         if ratio is not None:
             num = len(self.x)
             indexes = np.random.permutation(num)
@@ -63,27 +63,30 @@ class PACS(Dataset):
             self.y = self.y[indexes[0:sel_num]]
             self.op_labels = self.op_labels[indexes[0:sel_num]]
         f.close()
+
         def resize(x):
             x = x[:, :,
                 [2, 1, 0]]  # we use the pre-read hdf5 data file from the download page and need to change BGR to RGB
             x = x.astype(np.uint8)
             return np.array(Image.fromarray(obj=x, mode='RGB').resize(size=(224, 224)))
+
         self.x = np.array(list(map(resize, self.x)))
-        self.x = torch.tensor(self.x).permute(0,3,1,2)
+        self.x = torch.tensor(self.x).permute(0, 3, 1, 2)
         self.y -= np.min(self.y)
         self.y = torch.tensor(self.y.astype(np.int64))
         self.preprocess = transforms.Compose([
-                transforms.Resize((224,224)),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
         self.train_transform = transforms.Compose([
-                    transforms.RandomResizedCrop(224),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                ])
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
         self.image_denormalise = Denormalise([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
     def __len__(self):
         return len(self.x)
 
@@ -99,7 +102,7 @@ class PACS(Dataset):
 
 class PACSMultiple(Dataset):
     def __init__(self, root_folder, names, split='train', transform=None):
-        
+
         if split == 'train':
             if transform is None:
                 self.transform = transforms.Compose([
@@ -121,15 +124,17 @@ class PACSMultiple(Dataset):
                 ])
             else:
                 self.transform = transform
+
         def resize(x):
             x = x[:, :,
                 [2, 1, 0]]  # we use the pre-read hdf5 data file from the download page and need to change BGR to RGB
             x = x.astype(np.uint8)
             return np.array(Image.fromarray(obj=x, mode='RGB').resize(size=(224, 224)))
+
         self.x = []
         self.y = []
         for name in names:
-            path = os.path.join(root_folder, '{}_{}.hdf5'.format(name,split))
+            path = os.path.join(root_folder, '{}_{}.hdf5'.format(name, split))
             f = h5py.File(path, "r")
             x = np.array(f['images'])
             y = np.array(f['labels'])
@@ -154,27 +159,29 @@ class PACSMultiple(Dataset):
         x = self.transform(x)
         return x, y
 
+
 class PACSTensor(Dataset):
     def __init__(self, root_folder, name, split='train', transform=None):
-        path = os.path.join(root_folder, '{}_{}.hdf5'.format(name,split))
-        
+        path = os.path.join(root_folder, '{}_{}.hdf5'.format(name, split))
+
         f = h5py.File(path, "r")
         self.x = np.array(f['images'])
         self.y = np.array(f['labels'])
         f.close()
+
         def resize(x):
             x = x[:, :,
                 [2, 1, 0]]  # we use the pre-read hdf5 data file from the download page and need to change BGR to RGB
             x = x.astype(np.uint8)
             return np.array(Image.fromarray(obj=x, mode='RGB').resize(size=(224, 224)))
+
         self.x = np.array(list(map(resize, self.x)))
-        self.x = torch.tensor(self.normalize(self.x),dtype=torch.float32)
+        self.x = torch.tensor(self.normalize(self.x), dtype=torch.float32)
         self.y -= np.min(self.y)
-        self.y = torch.tensor(self.y,dtype=torch.long)
+        self.y = torch.tensor(self.y, dtype=torch.long)
 
     def __len__(self):
         return len(self.x)
-
 
     def normalize(self, inputs):
 
@@ -206,7 +213,6 @@ class PACSTensor(Dataset):
         x = self.x[index]
         y = self.y[index]
         return x, y
-
 
 
 class PACSTensorMultiple(Dataset):
@@ -216,18 +222,19 @@ class PACSTensorMultiple(Dataset):
                 [2, 1, 0]]  # we use the pre-read hdf5 data file from the download page and need to change BGR to RGB
             x = x.astype(np.uint8)
             return np.array(Image.fromarray(obj=x, mode='RGB').resize(size=(224, 224)))
+
         self.x = []
         self.y = []
         for name in names:
-            path = os.path.join(root_folder, '{}_{}.hdf5'.format(name,split))
+            path = os.path.join(root_folder, '{}_{}.hdf5'.format(name, split))
             f = h5py.File(path, "r")
             x = np.array(f['images'])
             y = np.array(f['labels'])
             f.close()
             x = np.array(list(map(resize, x)))
-            x = torch.tensor(self.normalize(x),dtype=torch.float32)
+            x = torch.tensor(self.normalize(x), dtype=torch.float32)
             y -= np.min(y)
-            y = torch.tensor(y,dtype=torch.long)
+            y = torch.tensor(y, dtype=torch.long)
 
             self.x.append(x)
             self.y.append(y)
@@ -236,7 +243,6 @@ class PACSTensorMultiple(Dataset):
 
     def __len__(self):
         return len(self.x)
-
 
     def normalize(self, inputs):
 
@@ -268,5 +274,3 @@ class PACSTensorMultiple(Dataset):
         x = self.x[index]
         y = self.y[index]
         return x, y
-
-

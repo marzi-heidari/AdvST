@@ -1,9 +1,7 @@
-from main_mnist import main as train_mnist
 import argparse
-import os
-import numpy as np
+
 from common.utils import get_freer_gpu
-from model_mnist import SemanticPerturbation
+from main_mnist import main as train_mnist
 
 
 class Namespace:
@@ -16,7 +14,7 @@ def main(args):
     # For AdvST/AdvST-ME experiments
     mnist_AdvST_args = Namespace(
         seed=args.seed,
-        algorithm="AdvST",
+        algorithm="memory-cat",
         test_every=100,
         batch_size=32,
         num_classes=10,
@@ -41,8 +39,8 @@ def main(args):
         eta_min=10.0,  # parameter for the entropy regularizer in the minimization procedure
         beta=1.0,  # paramter for the contrastive loss regularizer
         gpu=args.gpu,
-        num_workers=4,
-        train_mode="contrastive",  # contrastive, norm
+        num_workers=0,
+        train_mode="norm",  # contrastive, norm
         tag="",
         aug_number=0,
         gen_freq=1,
