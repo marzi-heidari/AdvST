@@ -16,6 +16,8 @@ def main(args):
         seed=args.seed,
         algorithm="memory-cat",
         test_every=100,
+        augment_encoder=False,
+        mixup_label=False,
         batch_size=32,
         num_classes=10,
         num_samples=10000,

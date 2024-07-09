@@ -1,6 +1,6 @@
 import argparse
 
-from model_mnist import ModelBaseline as ERM_MNIST
+from model_mnist import ModelBaseline as ERM_MNIST, ModelMemory
 from model_mnist import ModelADA as ADA_MNIST
 from model_mnist import ModelADASemantics as AdvST_MNIST
 
@@ -40,6 +40,8 @@ def main(args):
                 model_obj = ADA_MNIST(flags=args)
             elif args.algorithm == "AdvST":
                 model_obj = AdvST_MNIST(flags=args)
+            elif args.algorithm == "memory-cat":
+                model_obj = ModelMemory(flags=args)
         elif dataset == "pacs":
             if args.algorithm == "ERM":
                 model_obj = ERM_PACS(flags=args)

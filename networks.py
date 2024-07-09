@@ -352,15 +352,15 @@ class FeatureAugmentationNetworkCat(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size)
         self.merge_coeff = merge_coeff
 
-    def forward(self, features, memory_features, labels=None, memory_lables=None, device=None):
+    def forward(self, features, memory_features, labels=None, memory_lables=None, num_classes=7, device=None):
         tau = 1.0
         q = self.q_proj(features)
-        k = self.k_proj(memory_features)
+        k = self.q_proj(memory_features)
         # q = features
         # k = memory_features
         attn = torch.matmul(q, k.t())
         sqrt = torch.sqrt(torch.tensor(self.hidden_size, dtype=torch.float32))
-        attn = torch.softmax(attn/sqrt, dim=-1)
+        attn = torch.softmax(attn / sqrt, dim=-1)
         v = memory_features
         augment_features = torch.matmul(attn, v)
         # augment_features = F.normalize(augment_features, dim=-1)
@@ -368,11 +368,11 @@ class FeatureAugmentationNetworkCat(nn.Module):
         augmented_features = torch.cat([features, augment_features], dim=-1)
         if labels is None:
             return augmented_features
-        one_hot = F.one_hot(memory_lables, num_classes=7).float()
-        one_hot_o = F.one_hot(labels, num_classes=7).float()
-        # augmented_labels = 0.5 * torch.matmul(attn, one_hot) + one_hot_o * 0.5
+        one_hot = F.one_hot(memory_lables, num_classes=num_classes).float()
+        one_hot_o = F.one_hot(labels, num_classes=num_classes).float()
+        augmented_labels = 0.5 * torch.matmul(attn, one_hot) + one_hot_o * 0.5
         # augmented_labels = augmented_labels.to(device)
-        augmented_labels = one_hot_o
+        # augmented_labels = one_hot_o
 
         return augmented_features, augmented_labels
 

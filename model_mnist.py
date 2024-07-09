@@ -1,23 +1,25 @@
 from __future__ import print_function, absolute_import, division
 
 import os
+import random
+from copy import deepcopy
+
+import kornia
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from torch.autograd import Variable
-from torch.optim import lr_scheduler
-import random
 import torchvision
-from torchvision import transforms
-from models.lenet import LeNet5
+from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, RandomSampler
+from tqdm import tqdm
+
+from common.contrastive import SupConLoss
 from common.data_gen_MNIST import (
-    BatchImageGenerator,
     get_data_loaders,
     get_data_loaders_imbalanced,
 )
-from common.contrastive import SupConLoss
 from common.utils import (
     fix_all_seed,
     write_log,
@@ -27,15 +29,8 @@ from common.utils import (
     entropy_loss,
     Averager,
 )
-from common.randaugment import RandAugment
-import pickle
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import ImageGrid
-
-from tqdm import tqdm
-from copy import deepcopy
-import kornia
 from config import DIGITS_DATA_FOLDER
+from models.lenet import LeNet5
 from networks import AdversarialFeatureMemoryBank, FeatureAugmentationNetworkCat
 
 
@@ -511,21 +506,25 @@ class ModelBaseline(object):
     def batch_test(self, ood_loader):
         # switch on the network test mode
         self.network.eval()
-        test_image_preds = []
-        test_labels = []
-        for images_test, labels_test, _ in ood_loader:
-            images_test, labels_test = images_test.cuda(), labels_test.cuda()
+        with torch.no_grad():
+            memory_features, _ = self.adv_memory.memory_bank
+            test_image_preds = []
+            test_labels = []
+            for images_test, labels_test, _ in ood_loader:
+                images_test, labels_test = images_test.cuda(), labels_test.cuda()
 
-            out = self.network(images_test)
-            tuples = self.network.end_points
-            predictions = tuples["Predictions"]
-            predictions = predictions.cpu().data.numpy()
-            test_image_preds.append(predictions)
-            test_labels.append(labels_test.cpu().data.numpy())
-        predictions = np.concatenate(test_image_preds)
-        test_labels = np.concatenate(test_labels)
+                outputs, tuples = self.network(images_test)
+                features = tuples["Embedding"]
+                # predictions = tuples["Predictions"]
+                features_aug = self.augment_net(features, memory_features)
+                predictions = self.network.fc(features_aug)
+                predictions = predictions.cpu().data.numpy()
+                test_image_preds.append(predictions)
+                test_labels.append(labels_test.cpu().data.numpy())
+            predictions = np.concatenate(test_image_preds)
+            test_labels = np.concatenate(test_labels)
 
-        accuracy = compute_accuracy(predictions=predictions, labels=test_labels)
+            accuracy = compute_accuracy(predictions=predictions, labels=test_labels)
 
         return accuracy
 
@@ -561,20 +560,20 @@ class ModelMemory(ModelBaseline):
 
     def save_model(self, file_name, flags):
         outfile = os.path.join(flags.model_path, file_name)
-        aug_probs = [
-            (
-                "-".join(
-                    [
-                        self.semantic_config.semantic_aug_list[o][0].__name__
-                        for o in self.semantic_config.ops[i]
-                    ]
-                ),
-                self.semantic_config.probs[i],
-            )
-            for i in range(len(self.semantic_config.ops))
-        ]
+        # aug_probs = [
+        #     (
+        #         "-".join(
+        #             [
+        #                 self.semantic_config.semantic_aug_list[o][0].__name__
+        #                 for o in self.semantic_config.ops[i]
+        #             ]
+        #         ),
+        #         self.semantic_config.probs[i],
+        #     )
+        #     for i in range(len(self.semantic_config.ops))
+        # ]
         torch.save(
-            {"state": self.network.state_dict(), "args": flags, "aug_probs": aug_probs},
+            {"state": self.network.state_dict(), "args": flags, },
             outfile,
         )
 
@@ -613,8 +612,8 @@ class ModelMemory(ModelBaseline):
             con_loss_avger = Averager()
 
             for ite, (images_train, labels_train, op_labels) in tqdm(
-                    enumerate(self.train_loader, start=1),
-                    total=len(self.train_loader),
+                    enumerate(self.all_loader, start=1),
+                    total=len(self.all_loader),
                     leave=False,
                     desc="train-epoch{}".format(epoch),
             ):
@@ -635,11 +634,11 @@ class ModelMemory(ModelBaseline):
 
                     if self.args.augment_encoder:
                         features_aug, labels_aug = self.augment_net(features, memory_features.detach(), labels,
-                                                                    memory_labels, self.device)
+                                                                    memory_labels, 10, self.device)
                         # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
                     else:
                         features_aug, labels_aug = self.augment_net(features.detach(), memory_features.detach(), labels,
-                                                                    memory_labels, self.device)
+                                                                    memory_labels, 10, self.device)
                         # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
 
                     logits_aug = self.network.fc(features_aug)
@@ -649,10 +648,10 @@ class ModelMemory(ModelBaseline):
                         loss_aug = F.cross_entropy(logits_aug, labels_aug)
 
                     loss = loss_aug + cls_loss
-                    print('here')
+                    # print('here')
                 else:
                     loss = cls_loss
-                    print('here1')
+                    # print('here1')
                 self.aug_optim.zero_grad()
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -660,38 +659,44 @@ class ModelMemory(ModelBaseline):
                 if epoch > 3:
                     self.aug_optim.step()
                 loss_avger.add(loss.item())
-            # self.adv_memory.init_memory_bank(model=self.network, trainloader=self.all_loader, device=self.device,
-            #                                  num_classes=self.args.num_classes, epoch=epoch)
+            self.adv_memory.update_memory_bank_cat(model=self.network, trainloader=self.train_loader,
+                                                   device=self.device,
+                                                   num_classes=self.args.num_classes, epoch=epoch)
 
-            self.scheduler.step()
-        val_acc = self.batch_test(self.all_loader)
-        acc_arr = self.batch_test_workflow()
-        mean_acc = np.array(acc_arr).mean()
-        names = [n for n, _ in self.test_loaders]
-        res = (
-                "\n{} ".format(self.train_name)
-                + " ".join(["{}:{:.6f}".format(n, a) for n, a in zip(names, acc_arr)])
-                + " Mean:{:.6f}".format(mean_acc)
-        )
-        msg = "[{}] train_loss:{:.4f} cls:{:.4f} con:{:.4f} lr:{:.4f} val_acc:{:.4f}".format(
-            epoch,
-            loss_avger.item(),
-            cls_loss_avger.item(),
-            con_loss_avger.item(),
-            self.scheduler.get_last_lr()[0],
-            val_acc,
-        )
-
-        if best_test_acc < mean_acc:
-            best_test_acc = mean_acc
-            self.save_model("best_test_model.tar", flags)
-        if best_val_acc < val_acc:
-            best_val_acc = val_acc
-            msg += " (best)"
-            self.save_model("best_model.tar", flags)
-        msg += res
-        print(msg)
-        write_log(msg, flags_log)
+            if epoch % 1 == 0:
+                acc_arr = self.batch_test_workflow()
+                mean_acc = np.array(acc_arr).mean()
+                val_acc = self.batch_test(self.all_loader)
+                if flags.train_mode == "contrastive":
+                    msg = "[{}] train_loss:{:.4f}|{:.4f} cls:{:.4f} con:{:.4f} lr:{:.4f} val_acc:{:.4f}".format(
+                        epoch,
+                        loss_avger.item(),
+                        cls_loss_avger.item(),
+                        con_loss_avger.item(),
+                        self.scheduler.get_last_lr()[0],
+                        val_acc,
+                    )
+                else:
+                    msg = "[{}] train_loss:|{:.4f} cls:{:.4f} lr:{:.4f} val_acc:{:.4f}".format(
+                        epoch,
+                        loss_avger.item(),
+                        cls_loss_avger.item(),
+                        self.scheduler.get_last_lr()[0],
+                        val_acc,
+                    )
+                if best_val_acc < val_acc:
+                    best_val_acc = val_acc
+                    msg += " (best)"
+                    self.save_model("best_model.tar", flags)
+                if best_test_acc < mean_acc:
+                    best_test_acc = mean_acc
+                    self.save_model("best_test_model.tar", flags)
+                msg += "\nAvg:{:.4f} ".format(mean_acc) + " ".join(
+                    ["{}:{:.4f}".format(n, a) for a, n in zip(acc_arr, self.test_data)]
+                )
+                print(msg)
+                write_log(msg, flags_log)
+                self.scheduler.step()
 
 
 class ModelADASemantics(ModelBaseline):
