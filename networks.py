@@ -8,72 +8,7 @@ from sklearn.cluster import k_means
 from transformers import RobertaModel
 
 
-class RobertaClassificationHead(nn.Module):
-    """Head for sentence-level classification tasks."""
 
-    def __init__(self, hidden_size, hidden_dropout_prob, num_labels):
-        super().__init__()
-        self.dense = nn.Linear(hidden_size, hidden_size)
-        self.dropout = nn.Dropout(hidden_dropout_prob)
-        self.out_proj = nn.Linear(hidden_size, num_labels)
-
-    def forward(self, features):
-        x = self.dropout(features)
-        x = self.dense(x)
-        x = torch.tanh(x)
-        x = self.dropout(x)
-        x = self.out_proj(x)
-        return x
-
-
-class RobertaForSequenceClassificationConcat(nn.Module):
-    """reference: transformers.RobertaForSequenceClassification"""
-
-    def __init__(self, hidden_dropout_prob=0.0, num_labels=2):
-        super().__init__()
-        self.roberta = RobertaModel.from_pretrained('roberta-base', add_pooling_layer=False)
-        self.hidden_size = self.roberta.config.hidden_size
-        self.classifier = RobertaClassificationHead(2 * self.hidden_size, hidden_dropout_prob, num_labels)
-
-    def forward(self, encoded_input):
-        output = self.roberta(**encoded_input)
-        last_hidden_state = output.last_hidden_state  # same as output[0]
-        features = last_hidden_state[:, 0, :]  # take <s> token (equiv. to [CLS])
-        features_cat = torch.cat([features, features], dim=-1)
-        logits = self.classifier(features_cat)
-
-        return features, logits
-
-    def save_pretrained(self, path):
-        torch.save(self.state_dict(), path)
-
-    def from_pretrained(self, path):
-        self.load_state_dict(torch.load(path))
-
-
-class RobertaForSequenceClassification(nn.Module):
-    """reference: transformers.RobertaForSequenceClassification"""
-
-    def __init__(self, hidden_dropout_prob=0.0, num_labels=2):
-        super().__init__()
-        self.roberta = RobertaModel.from_pretrained('roberta-base', add_pooling_layer=False)
-        self.hidden_size = self.roberta.config.hidden_size
-        self.classifier = RobertaClassificationHead(self.hidden_size, hidden_dropout_prob, num_labels)
-
-    def forward(self, encoded_input):
-        output = self.roberta(**encoded_input)
-        last_hidden_state = output.last_hidden_state  # same as output[0]
-        features = last_hidden_state[:, 0, :]  # take <s> token (equiv. to [CLS])
-
-        logits = self.classifier(features)
-
-        return features, logits
-
-    def save_pretrained(self, path):
-        torch.save(self.state_dict(), path)
-
-    def from_pretrained(self, path):
-        self.load_state_dict(torch.load(path))
 
 
 class AdversarialFeatureMemoryBank:
@@ -89,8 +24,8 @@ class AdversarialFeatureMemoryBank:
         with torch.no_grad():
             for encoded_inputs, labels, _ in trainloader:
                 encoded_inputs, labels = encoded_inputs.to(device), labels.to(device)
-                # noisy_input = encoded_inputs + torch.randn_like(encoded_inputs) * 0.0001
-                _, output = model(encoded_inputs)
+                noisy_input = encoded_inputs + torch.randn_like(encoded_inputs) * 0.0001
+                _, output = model(noisy_input)
                 features = output['Embedding']
                 all_features.append(features)
                 all_labels.append(labels)
@@ -113,7 +48,7 @@ class AdversarialFeatureMemoryBank:
             selected_indices = np.concatenate(selected_indices)
             feats = all_features[selected_indices]
             lbs = all_labels[selected_indices]
-        adv_feats = self.langevin_process_cat(model.fc, feats, lbs, num_iters=5, epoch=epoch)
+        adv_feats = self.langevin_process_cat(model.cl.fc2, feats, lbs, num_iters=5, epoch=epoch)
         model.train()
         # adv_feats_ = adv_feats / torch.norm(adv_feats, dim=-1, keepdim=True)
         self.memory_bank = (adv_feats, lbs)
@@ -126,8 +61,8 @@ class AdversarialFeatureMemoryBank:
         with torch.no_grad():
             for encoded_inputs, labels, _ in trainloader:
                 encoded_inputs, labels = encoded_inputs.to(device), labels.to(device)
-                # noisy_input = encoded_inputs + torch.randn_like(encoded_inputs) * 0.001
-                _, output = model(encoded_inputs)
+                noisy_input = encoded_inputs + torch.randn_like(encoded_inputs) * 0.0001
+                _, output = model(noisy_input)
                 features = output['Embedding']
                 all_features.append(features)
                 all_labels.append(labels)
@@ -141,13 +76,13 @@ class AdversarialFeatureMemoryBank:
 
             feats = all_features[selected_indices]
             lbs = all_labels[selected_indices]
-        adv_feats = self.langevin_process_cat(model.fc, feats, lbs, num_iters=5, epoch=epoch)
+        adv_feats = self.langevin_process_cat(model.cl.fc2, feats, lbs, num_iters=5, epoch=epoch)
         memory_features, memory_labels = self.memory_bank
         model.train()
         # adv_feats_ = adv_feats / torch.norm(adv_feats, dim=-1, keepdim=True)
         with torch.no_grad():
             mem_cat = torch.cat([memory_features, memory_features], dim=-1)
-            logits = model.fc(mem_cat)
+            logits = model.cl.fc2(mem_cat)
 
             probs = F.softmax(logits, dim=-1)
             entropy = - torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
@@ -350,22 +285,27 @@ class FeatureAugmentationNetworkCat(nn.Module):
         self.q_proj = nn.Linear(hidden_size, hidden_size)
         self.k_proj = nn.Linear(hidden_size, hidden_size)
         self.v_proj = nn.Linear(hidden_size, hidden_size)
+
+        self.tau = nn.Parameter(torch.tensor(1.0))
         self.merge_coeff = merge_coeff
+        self.norm_q = nn.LayerNorm(hidden_size)
+        self.norm_k = nn.LayerNorm(hidden_size)
+        self.norm_v = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, features, memory_features, labels=None, memory_lables=None, num_classes=7, device=None):
-        tau = 1.0
-        q = self.q_proj(features)
-        k = self.q_proj(memory_features)
-        # q = features
-        # k = memory_features
-        attn = torch.matmul(q, k.t())
-        sqrt = torch.sqrt(torch.tensor(self.hidden_size, dtype=torch.float32))
-        attn = torch.softmax(attn / sqrt, dim=-1)
-        v = memory_features
+        q = self.norm_q(self.q_proj(features))
+        k = self.norm_k(self.q_proj(memory_features))
+        v = self.norm_v(memory_features)
+
+        attn = torch.matmul(q, k.t()) / (torch.sqrt(torch.tensor(self.hidden_size, dtype=torch.float32)) * self.tau)
+        attn = torch.softmax(self.dropout(attn), dim=-1)
         augment_features = torch.matmul(attn, v)
+
+        augmented_features = torch.cat([features, augment_features], dim=-1)
         # augment_features = F.normalize(augment_features, dim=-1)
         # augment_features_ = augment_features / torch.norm(augment_features, dim=-1, keepdim=True)
-        augmented_features = torch.cat([features, augment_features], dim=-1)
+        # augmented_features = torch.cat([features, augment_features], dim=-1)
         if labels is None:
             return augmented_features
         one_hot = F.one_hot(memory_lables, num_classes=num_classes).float()

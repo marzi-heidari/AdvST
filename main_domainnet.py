@@ -1,6 +1,6 @@
 import argparse
 import os
-from model_domainnet import ModelADASemantics, ModelADASemanticsDisk, ModelADA, ModelBaseline
+from model_domainnet import ModelADASemantics, ModelADASemanticsDisk, ModelADA, ModelBaseline, ModelMemoryDisk
 from common.utils import time_str, Timer, set_gpu
 from test_models import main as eval_models
 
@@ -24,7 +24,10 @@ def main(args):
             model_obj = ModelADASemantics(flags=args)
         else:
             model_obj = ModelADASemanticsDisk(flags=args)
+    elif args.algorithm == "memory-cat":
+        model_obj = ModelMemoryDisk(flags=args)
     else:
+
         raise RuntimeError
     timer = Timer()
     if getattr(args, "chkpt_path", None) is not None:

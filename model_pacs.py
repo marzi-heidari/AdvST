@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import kornia
 import matplotlib.pyplot as plt
+import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
@@ -327,6 +328,14 @@ class ModelBaseline(object):
                 contrastive=flags.train_mode,
             )
         self.network = self.network.cuda()
+        self.teacher = resnet18(
+            pretrained=True,
+            num_classes=flags.num_classes,
+            contrastive=flags.train_mode,
+        )
+        self.teacher = self.teacher.cuda()
+        for param in self.teacher.parameters():
+            param.requires_grad = False
 
         print(self.network)
         print("flags:", flags)
@@ -340,6 +349,13 @@ class ModelBaseline(object):
         print("flags:", flag_str)
         flags_log = os.path.join(flags.logs, "flags_log.txt")
         write_log(flag_str, flags_log)
+
+    @torch.no_grad
+    def update_teacher_params(self, alpha=0.9):
+        self.network.train()
+        self.teacher.train()
+        for param_q, param_k in zip(self.network.parameters(), self.teacher.parameters()):
+            param_k.data = param_k.data * alpha + param_q.data * (1.0 - alpha)
 
     def setup_path(self, flags):
         root_folder = PACS_DATA_FOLDER
@@ -421,11 +437,18 @@ class ModelBaseline(object):
     def configure(self, flags):
         for name, param in self.network.named_parameters():
             print(name, param.size())
-        param_group = [{'params': self.network.parameters(), 'lr': flags.lr},
-                       {'params': self.augment_net.parameters(), 'lr': flags.lr}]
+        # param_group = [{'params': self.network.parameters(), 'lr': flags.lr},
+        #                {'params': self.augment_net.parameters(), 'lr': flags.lr}]
+        parameter_list = []
+        classifier_param = list(map(id, self.network.cl.parameters()))
+        backbone_param = filter(lambda p: id(p) not in classifier_param and p.requires_grad, self.network.parameters())
+
+        parameter_list.append({'params': backbone_param, 'lr': flags.lr})
+        parameter_list.append({'params': self.network.cl.parameters(), 'lr': flags.lr})
+        parameter_list.append({'params': self.augment_net.parameters(), 'lr': flags.lr})
 
         self.optimizer = torch.optim.SGD(
-            param_group,
+            parameter_list,
             weight_decay=flags.weight_decay,
             momentum=flags.momentum,
             nesterov=True,
@@ -541,7 +564,7 @@ class ModelBaseline(object):
 
                 out, end_points = self.network(images_test)
                 features_aug = self.augment_net(end_points['Embedding'], memory_features)
-                predictions = self.network.fc(features_aug)
+                predictions = self.network.cl.fc2(features_aug)
                 predictions = predictions.cpu().data.numpy()
                 test_image_preds.append(predictions)
                 test_labels.append(labels_test.cpu().data.numpy())
@@ -737,7 +760,7 @@ class ModelMemoey(ModelBaseline):
 
         self.device = torch.device(f"cuda:{flags.gpu}")
         self.adv_memory = AdversarialFeatureMemoryBank(memory_size=memory_size)
-        self.augment_net = FeatureAugmentationNetworkCat(512).to(self.device)
+        self.augment_net = FeatureAugmentationNetworkCat(256).to(self.device)
         # self.aug_optim = torch.optim.SGD(self.augment_net.parameters(), lr=flags.lr, momentum=0.9, weight_decay=1e-4)
         super(ModelMemoey, self).__init__(flags)
 
@@ -915,17 +938,17 @@ class ModelMemoey(ModelBaseline):
 
                     if self.args.augment_encoder:
                         features_aug, labels_aug = self.augment_net(features, memory_features.detach(), labels,
-                                                                    memory_labels, self.device)
+                                                                    memory_labels, 7, self.device)
                         # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
                     else:
                         features_aug, labels_aug = self.augment_net(features.detach(), memory_features.detach(), labels,
-                                                                    memory_labels, self.device)
+                                                                    memory_labels, 7, self.device)
                         # feat_only_aug, labels_only_aug = self.augment_net.get_only_aug(features.detach(),
                         #                                                                memory_features.detach(), labels,
                         #                                                                memory_labels, self.device)
                         # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
 
-                    logits_aug = self.network.fc(features_aug)
+                    logits_aug = self.network.cl.fc2(features_aug)
                     # logits_aug1 = self.network.fc(feat_only_aug)
                     if self.args.mixup_label:
                         loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
@@ -991,6 +1014,7 @@ class ModelMemoey(ModelBaseline):
                 # self.optimizer.step()
 
                 loss_avger.add(loss.item())
+                self.update_teacher_params()
             self.adv_memory.update_memory_bank_cat(model=self.network, trainloader=self.train_loader,
                                                    device=self.device,
                                                    num_classes=self.args.num_classes, epoch=epoch)

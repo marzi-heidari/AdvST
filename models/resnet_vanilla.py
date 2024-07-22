@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 __all__ = ['ResNet', 'resnet18']
 
+from torchvision.models import ResNet18_Weights, ResNet50_Weights
+
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
 }
@@ -48,10 +50,40 @@ class BasicBlock(nn.Module):
         return out
 
 
+class AdvancedClassifierHead(nn.Module):
+    def __init__(self, input_features, num_classes):
+        super(AdvancedClassifierHead, self).__init__()
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.flatten = nn.Flatten()
+        self.bottleneck = nn.Linear(input_features, 512)  # Reduce dimensionality
+        self.bn1 = nn.BatchNorm1d(512)
+        self.dropout = nn.Dropout(0.5)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc1 = nn.Linear(512, 256)
+        self.bn2 = nn.BatchNorm1d(256)
+        self.fc2 = nn.Linear(256 * 2, num_classes)
+
+    def forward(self, x):
+        x = self.adaptive_pool(x)
+        x = self.flatten(x)
+        x = self.bottleneck(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc1(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+
+
+        return x
+
+
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, num_classes=1000, contrastive=''):
+    def __init__(self, block, layers, num_classes=7, c_dim=512 * 4, contrastive=False):
         self.inplanes = 64
+        self.contrastive = False
+
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
@@ -63,15 +95,7 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AvgPool2d(7, stride=1)
-        self.fc = nn.Linear(512 * 2, num_classes)
-        self.pro_head = nn.Linear(512 * block.expansion, 128)
-
-        if 'contrastive' in contrastive:
-
-            self.contrastive = True
-        else:
-            self.contrastive = False
-
+        self.cl = AdvancedClassifierHead(512, num_classes=num_classes)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -107,9 +131,7 @@ class ResNet(nn.Module):
             layers.append(block(self.inplanes, planes))
 
         return nn.Sequential(*layers)
-
     def forward(self, x):
-
         end_points = {}
         x = self.conv1(x)
         x = self.bn1(x)
@@ -122,15 +144,16 @@ class ResNet(nn.Module):
         x = self.layer4(x)
 
         x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
+        # x = x.view(x.size(0), -1)
         # x = self.get_proj(x)
-
-        end_points['Embedding'] = x
 
         if self.contrastive:
             end_points['Projection'] = self.get_proj(x)
+        # x = torch.cat([x, x], dim=-1)
+        x = self.cl(x)
+        end_points['Embedding'] = x
         x = torch.cat([x, x], dim=-1)
-        x = self.fc(x)
+        x = self.cl.fc2(x)
 
         end_points['Predictions'] = F.softmax(input=x, dim=-1)
 
@@ -144,13 +167,15 @@ def resnet18(pretrained=False, **kwargs):
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
     if pretrained:
-        pretrained_dict = model_zoo.load_url(model_urls['resnet18'])
-        model_dict = model.state_dict()
-        # 1. filter out unnecessary keys
-        pretrained_dict = {k: v.data for k, v in pretrained_dict.items() if
-                           k in model_dict and v.shape == model_dict[k].size()}
-        # 2. overwrite entries in the existing state dict
-        model_dict.update(pretrained_dict)
-        # 3. load the new state dict
-        model.load_state_dict(model_dict)
+        model.load_state_dict(model_zoo.load_url(ResNet18_Weights.IMAGENET1K_V1.url), strict=False)
+    return model
+
+def resnet50(pretrained=False, **kwargs):
+    """Constructs a ResNet-50 model.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(ResNet50_Weights.IMAGENET1K_V2.url), strict=False)
     return model

@@ -13,8 +13,10 @@ import torch.nn.functional as F
 import torchvision
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, RandomSampler
+from torchvision.transforms import transforms
 from tqdm import tqdm
 
+from common.autoaugment import SVHNPolicy
 from common.contrastive import SupConLoss
 from common.data_gen_MNIST import (
     get_data_loaders,
@@ -396,7 +398,7 @@ class ModelBaseline(object):
         write_log(str(self.test_data), flags_log)
 
         self.train_dataset = dataset_funcs[seen_index](
-            root_folder, train=True, aug=flags.aug, con=flags.aug_number
+            root_folder, train=True, aug='AA', con=flags.aug_number
         )
         self.test_dataset = dataset_funcs[seen_index](
             root_folder, train=False, aug="", con=0
@@ -412,9 +414,9 @@ class ModelBaseline(object):
         self.test_loader = DataLoader(
             self.test_dataset, batch_size=flags.batch_size, num_workers=0, shuffle=False
         )
-        all_dataset = dataset_funcs[seen_index](root_folder, train=True, aug="", con=0)
+        all_dataset = dataset_funcs[seen_index](root_folder, train=True, aug="AA", con=0)
         all_dataset2 = dataset_funcs[seen_index](
-            root_folder, train=False, aug="", con=0
+            root_folder, train=False, aug="AA", con=0
         )
         all_dataset.x = torch.cat([all_dataset.x, all_dataset2.x], 0)
         all_dataset.y = torch.cat([all_dataset.y, all_dataset2.y], 0)
@@ -422,6 +424,14 @@ class ModelBaseline(object):
             [all_dataset.op_labels, all_dataset2.op_labels], 0
         )
         del all_dataset2
+        # self.train_transform = transforms.Compose([
+        #
+        #     SVHNPolicy(),
+        #     transforms.ToTensor(),
+        #     # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        # ])
+        # all_dataset.transform = self.train_transform
+        # all_dataset.train_tr = self.train_transform
         self.all_loader = DataLoader(
             all_dataset, batch_size=flags.batch_size, num_workers=0, shuffle=False
         )
@@ -606,6 +616,7 @@ class ModelMemory(ModelBaseline):
         counter_ite = 0
         self.adv_memory.init_memory_bank(model=self.network, trainloader=self.train_loader, device=self.device,
                                          num_classes=self.args.num_classes)
+
         for epoch in range(1, flags.train_epochs + 1):
             loss_avger = Averager()
             cls_loss_avger = Averager()

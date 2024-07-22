@@ -1,16 +1,9 @@
-from main_domainnet import main as train_domainnet
 import argparse
-import os
-import subprocess
-import multiprocessing as mp
-from functools import partial, reduce
-import shlex
-import time
-from copy import deepcopy
-import glob
-import shutil
-from common.utils import get_freer_gpu
+
 import torch.multiprocessing
+
+from common.utils import get_freer_gpu
+from main_domainnet import main as train_domainnet
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -39,7 +32,7 @@ def main(args):
     # For AdvST/AdvST-ME experiments
     domainnet_AdvST_args = Namespace(
         seed=args.seed,
-        algorithm="AdvST",  # AdvST
+        algorithm="memory-cat",  # AdvST
         model="resnet18",  # resnet18
         batch_size=128,
         num_classes=345,
@@ -61,7 +54,7 @@ def main(args):
         beta=1.0,  # paramter for the contrastive loss regularizer
         gpu=args.gpu,
         num_workers=8,
-        train_mode="contrastive",  # contrastive, norm
+        train_mode="norm",  # contrastive, norm
         tag="",
         gen_freq=1,
         domain_number=500,
@@ -70,12 +63,12 @@ def main(args):
     # For ADA/ME-ADA/ERM experiments
     domainnet_ada_args = Namespace(
         seed=args.seed,
-        algorithm="ADA",  # ERM, ADA
+        algorithm="memory-cat",  # ERM, ADA
         model="resnet18",  # alexnet or resnet18
         batch_size=128,
         num_classes=345,
         seen_index=0,
-        train_epochs=50,
+        train_epochs=200,
         loops_min=-1,  # use all training data per epoch
         loops_adv=50,
         dataset="domainnet",
