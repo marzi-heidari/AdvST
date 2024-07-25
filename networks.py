@@ -48,7 +48,7 @@ class AdversarialFeatureMemoryBank:
             selected_indices = np.concatenate(selected_indices)
             feats = all_features[selected_indices]
             lbs = all_labels[selected_indices]
-        adv_feats = self.langevin_process_cat(model.cl.fc2, feats, lbs, num_iters=5, epoch=epoch)
+        adv_feats = self.langevin_process_cat(model.cl, feats, lbs, num_iters=5, epoch=epoch)
         model.train()
         # adv_feats_ = adv_feats / torch.norm(adv_feats, dim=-1, keepdim=True)
         self.memory_bank = (adv_feats, lbs)
@@ -76,13 +76,13 @@ class AdversarialFeatureMemoryBank:
 
             feats = all_features[selected_indices]
             lbs = all_labels[selected_indices]
-        adv_feats = self.langevin_process_cat(model.cl.fc2, feats, lbs, num_iters=5, epoch=epoch)
+        adv_feats = self.langevin_process_cat(model.cl, feats, lbs, num_iters=5, epoch=epoch)
         memory_features, memory_labels = self.memory_bank
         model.train()
         # adv_feats_ = adv_feats / torch.norm(adv_feats, dim=-1, keepdim=True)
         with torch.no_grad():
             mem_cat = torch.cat([memory_features, memory_features], dim=-1)
-            logits = model.cl.fc2(mem_cat)
+            logits = model.cl(mem_cat)
 
             probs = F.softmax(logits, dim=-1)
             entropy = - torch.sum(probs * torch.log(probs + 1e-8), dim=-1)

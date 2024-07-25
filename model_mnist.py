@@ -527,7 +527,7 @@ class ModelBaseline(object):
                 features = tuples["Embedding"]
                 # predictions = tuples["Predictions"]
                 features_aug = self.augment_net(features, memory_features)
-                predictions = self.network.fc(features_aug)
+                predictions = self.network.cl(features_aug)
                 predictions = predictions.cpu().data.numpy()
                 test_image_preds.append(predictions)
                 test_labels.append(labels_test.cpu().data.numpy())
@@ -652,7 +652,7 @@ class ModelMemory(ModelBaseline):
                                                                     memory_labels, 10, self.device)
                         # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
 
-                    logits_aug = self.network.fc(features_aug)
+                    logits_aug = self.network.cl(features_aug)
                     if self.args.mixup_label:
                         loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
                     else:

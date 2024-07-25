@@ -50,32 +50,6 @@ class BasicBlock(nn.Module):
         return out
 
 
-class AdvancedClassifierHead(nn.Module):
-    def __init__(self, input_features, num_classes):
-        super(AdvancedClassifierHead, self).__init__()
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.flatten = nn.Flatten()
-        self.bottleneck = nn.Linear(input_features, 512)  # Reduce dimensionality
-        self.bn1 = nn.BatchNorm1d(512)
-        self.dropout = nn.Dropout(0.5)
-        self.relu = nn.ReLU(inplace=True)
-        self.fc1 = nn.Linear(512, 256)
-        self.bn2 = nn.BatchNorm1d(256)
-        self.fc2 = nn.Linear(256 * 2, num_classes)
-
-    def forward(self, x):
-        x = self.adaptive_pool(x)
-        x = self.flatten(x)
-        x = self.bottleneck(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.fc1(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-
-
-        return x
 
 
 class ResNet(nn.Module):
@@ -95,7 +69,7 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AvgPool2d(7, stride=1)
-        self.cl = AdvancedClassifierHead(512, num_classes=num_classes)
+        self.cl = nn.Linear(c_dim * 2, num_classes)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -144,16 +118,17 @@ class ResNet(nn.Module):
         x = self.layer4(x)
 
         x = self.avgpool(x)
-        # x = x.view(x.size(0), -1)
+        x = x.view(x.size(0), -1)
         # x = self.get_proj(x)
 
         if self.contrastive:
             end_points['Projection'] = self.get_proj(x)
         # x = torch.cat([x, x], dim=-1)
-        x = self.cl(x)
+
         end_points['Embedding'] = x
         x = torch.cat([x, x], dim=-1)
-        x = self.cl.fc2(x)
+        x = self.cl(x)
+
 
         end_points['Predictions'] = F.softmax(input=x, dim=-1)
 

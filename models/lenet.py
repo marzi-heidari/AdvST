@@ -16,7 +16,7 @@ class LeNet5(nn.Module):
         self.conv2 = nn.Conv2d(64, 128, kernel_size=5)
         self.fc1 = nn.Linear(128 * 5 * 5, 1024)
         self.fc2 = nn.Linear(1024, 1024)
-        self.fc = nn.Linear(1024 * 2, num_classes)
+        self.cl = nn.Linear(1024 * 2, num_classes)
         if 'contrastive' in contrastive:
             self.pro_head = nn.Linear(1024, 128)
             self.contrastive = True
@@ -44,7 +44,7 @@ class LeNet5(nn.Module):
         if self.contrastive:
             end_points['Projection'] = self.get_proj(x)
         x = torch.cat([x, x], -1)
-        x = self.fc(x)
+        x = self.cl(x)
 
         end_points['Predictions'] = F.softmax(input=x, dim=-1)
         self.end_points = end_points

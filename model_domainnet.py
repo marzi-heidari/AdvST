@@ -531,8 +531,8 @@ class ModelBaseline(object):
 
                 out, end_points = self.network(images_test)
                 features_aug = self.augment_net(end_points['Embedding'], memory_features)
-                predictions = self.network.cl.fc2(features_aug)
-                predictions = predictions.cpu().data.numpy()
+                predictions = self.network.cl(features_aug)
+
                 predictions = predictions.cpu().data.numpy()
                 test_image_preds.append(predictions)
                 test_labels.append(labels_test.cpu().data.numpy())
@@ -1408,17 +1408,17 @@ class ModelMemoryDisk(ModelBaseline):
 
                     if self.args.augment_encoder:
                         features_aug, labels_aug = self.augment_net(features, memory_features.detach(), labels,
-                                                                    memory_labels, 7, self.device)
+                                                                    memory_labels, self.args.num_classes, self.device)
                         # features_aug, labels_aug = feature_augmentation(features, labels, memory_features, memory_labels, args.mixup_label)
                     else:
                         features_aug, labels_aug = self.augment_net(features.detach(), memory_features.detach(), labels,
-                                                                    memory_labels, 7, self.device)
+                                                                    memory_labels, self.args.num_classes, self.device)
                         # feat_only_aug, labels_only_aug = self.augment_net.get_only_aug(features.detach(),
                         #                                                                memory_features.detach(), labels,
                         #                                                                memory_labels, self.device)
                         # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
 
-                    logits_aug = self.network.cl.fc2(features_aug)
+                    logits_aug = self.network.cl(features_aug)
                     # logits_aug1 = self.network.fc(feat_only_aug)
                     if self.args.mixup_label:
                         loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()

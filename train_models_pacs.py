@@ -14,7 +14,7 @@ def main(args):
     # For experiments on AdvST/AdvST-ME
     pacs_AdvST_args = Namespace(
         seed=args.seed,
-        augment_encoder=False,
+
         algorithm="memory-cat",  # ERM, ADA, AdvST
         model="resnet18",
         batch_size=32,
@@ -43,6 +43,7 @@ def main(args):
         domain_number=100,
         ratio=1.0,  # select how much training data to use
         mixup_label=False,
+        augment_encoder=False,
         tradeoff_aug_loss=1.0
     )
     # For ADA/ME-ADA/ERM experiments

@@ -564,7 +564,7 @@ class ModelBaseline(object):
 
                 out, end_points = self.network(images_test)
                 features_aug = self.augment_net(end_points['Embedding'], memory_features)
-                predictions = self.network.cl.fc2(features_aug)
+                predictions = self.network.cl(features_aug)
                 predictions = predictions.cpu().data.numpy()
                 test_image_preds.append(predictions)
                 test_labels.append(labels_test.cpu().data.numpy())
@@ -948,7 +948,7 @@ class ModelMemoey(ModelBaseline):
                         #                                                                memory_labels, self.device)
                         # features_aug, labels_aug = feature_augmentation(features.detach(), labels, memory_features, memory_labels, args.mixup_label)
 
-                    logits_aug = self.network.cl.fc2(features_aug)
+                    logits_aug = self.network.cl(features_aug)
                     # logits_aug1 = self.network.fc(feat_only_aug)
                     if self.args.mixup_label:
                         loss_aug = (- labels_aug * F.log_softmax(logits_aug, dim=-1)).sum(dim=-1).mean()
