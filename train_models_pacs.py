@@ -42,7 +42,7 @@ def main(args):
         gen_freq=1,
         domain_number=100,
         ratio=1.0,  # select how much training data to use
-        mixup_label=False,
+        mixup_label=True,
         augment_encoder=False,
         tradeoff_aug_loss=1.0
     )

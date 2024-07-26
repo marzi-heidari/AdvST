@@ -17,7 +17,7 @@ def main(args):
         algorithm="memory-cat",
         test_every=100,
         augment_encoder=False,
-        mixup_label=False,
+        mixup_label=True,
         batch_size=32,
         num_classes=10,
         num_samples=10000,

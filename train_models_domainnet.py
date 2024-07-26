@@ -90,7 +90,7 @@ def main(args):
         tag="",
         gen_freq=1,
         domain_number=3,
-        mixup_label=False,
+        mixup_label=True,
         augment_encoder=False,
         tradeoff_aug_loss=1.0,
         aug_folder="/root/folder/ME-ADA/aug_data_me"  # store generated images to disk instead of memory
