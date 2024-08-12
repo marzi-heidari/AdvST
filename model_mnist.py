@@ -401,7 +401,7 @@ class ModelBaseline(object):
             root_folder, train=True, aug='AA', con=flags.aug_number
         )
         self.test_dataset = dataset_funcs[seen_index](
-            root_folder, train=False, aug="", con=0
+            root_folder, train=False, aug="AA", con=0
         )
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -552,7 +552,7 @@ class ModelMemory(ModelBaseline):
     def __init__(self, flags):
 
         self.args = flags
-        memory_size = 1000
+        memory_size = 2000
 
         self.device = torch.device(f"cuda:{flags.gpu}")
         self.adv_memory = AdversarialFeatureMemoryBank(memory_size=memory_size)
@@ -614,7 +614,7 @@ class ModelMemory(ModelBaseline):
         #     # sampler=RandomSampler(train_dataset, True,flags.loops_min*flags.batch_size)
         # )
         counter_ite = 0
-        self.adv_memory.init_memory_bank(model=self.network, trainloader=self.train_loader, device=self.device,
+        self.adv_memory.init_memory_bank(model=self.network, trainloader=self.test_loader, device=self.device,
                                          num_classes=self.args.num_classes)
 
         for epoch in range(1, flags.train_epochs + 1):
@@ -623,8 +623,8 @@ class ModelMemory(ModelBaseline):
             con_loss_avger = Averager()
 
             for ite, (images_train, labels_train, op_labels) in tqdm(
-                    enumerate(self.all_loader, start=1),
-                    total=len(self.all_loader),
+                    enumerate(self.train_loader, start=1),
+                    total=len(self.train_loader),
                     leave=False,
                     desc="train-epoch{}".format(epoch),
             ):
@@ -670,7 +670,7 @@ class ModelMemory(ModelBaseline):
                 if epoch > 3:
                     self.aug_optim.step()
                 loss_avger.add(loss.item())
-            self.adv_memory.update_memory_bank_cat(model=self.network, trainloader=self.train_loader,
+            self.adv_memory.update_memory_bank_cat(model=self.network, trainloader=self.test_loader,
                                                    device=self.device,
                                                    num_classes=self.args.num_classes, epoch=epoch)
 

@@ -284,28 +284,23 @@ class FeatureAugmentationNetworkCat(nn.Module):
         self.hidden_size = hidden_size
         self.q_proj = nn.Linear(hidden_size, hidden_size)
         self.k_proj = nn.Linear(hidden_size, hidden_size)
-        self.v_proj = nn.Linear(hidden_size, hidden_size)
+
 
         self.tau = nn.Parameter(torch.tensor(1.0))
         self.merge_coeff = merge_coeff
-        self.norm_q = nn.LayerNorm(hidden_size)
-        self.norm_k = nn.LayerNorm(hidden_size)
-        self.norm_v = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(p=0.1)
+
 
     def forward(self, features, memory_features, labels=None, memory_lables=None, num_classes=7, device=None):
-        q = self.norm_q(self.q_proj(features))
-        k = self.norm_k(self.q_proj(memory_features))
-        v = self.norm_v(memory_features)
+        q = self.q_proj(features)
+        k = self.k_proj(memory_features)
+        v = memory_features
 
         attn = torch.matmul(q, k.t()) / (torch.sqrt(torch.tensor(self.hidden_size, dtype=torch.float32)) * self.tau)
-        attn = torch.softmax(self.dropout(attn), dim=-1)
+        # attn = torch.softmax(self.dropout(attn), dim=-1)
         augment_features = torch.matmul(attn, v)
 
         augmented_features = torch.cat([features, augment_features], dim=-1)
-        # augment_features = F.normalize(augment_features, dim=-1)
-        # augment_features_ = augment_features / torch.norm(augment_features, dim=-1, keepdim=True)
-        # augmented_features = torch.cat([features, augment_features], dim=-1)
+
         if labels is None:
             return augmented_features
         one_hot = F.one_hot(memory_lables, num_classes=num_classes).float()
