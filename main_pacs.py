@@ -1,6 +1,6 @@
 import argparse
 import os
-from model_pacs import ModelBaseline, ModelADA, ModelADASemantics
+from model_pacs import ModelBaseline
 from common.utils import time_str, Timer, set_gpu
 from test_models import main as eval_models
 
@@ -17,10 +17,9 @@ def main(args):
 
     if args.algorithm == "ERM":
         model_obj = ModelBaseline(flags=args)
-    elif args.algorithm == "ADA":
-        model_obj = ModelADA(flags=args)
-    elif args.algorithm == "AdvST":
-        model_obj = ModelADASemantics(flags=args)
+    if args.algorithm == "Target":
+        model_obj = ModelBaseline(flags=args)
+
     else:
         raise RuntimeError
     timer = Timer()
@@ -46,7 +45,7 @@ if __name__ == "__main__":
         "--model", type=str, default="alexnet", help="Choose model."
     )
     train_arg_parser.add_argument("--test_every", type=int, default=50, help="")
-    train_arg_parser.add_argument("--batch_size", type=int, default=32, help="")
+    train_arg_parser.add_argument("--batch_size", type=int, default=512, help="")
     train_arg_parser.add_argument("--num_classes", type=int, default=7, help="")
     train_arg_parser.add_argument("--step_size", type=int, default=3001, help="")
     train_arg_parser.add_argument("--bn_eval", type=int, default=0, help="")

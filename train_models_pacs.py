@@ -1,15 +1,7 @@
-from main_pacs import main as train_pacs
 import argparse
-import os
-import subprocess
-import multiprocessing as mp
-from functools import partial, reduce
-import shlex
-import time
-from copy import deepcopy
-import glob
-import shutil
+
 from common.utils import get_freer_gpu
+from main_pacs import main as train_pacs
 
 
 class Namespace:
@@ -22,7 +14,7 @@ def main(args):
     # For experiments on AdvST/AdvST-ME
     pacs_AdvST_args = Namespace(
         seed=args.seed,
-        algorithm="AdvST",  # ERM, ADA, AdvST
+        algorithm="Target",  # ERM, ADA, AdvST
         model="resnet18",
         batch_size=32,
         num_classes=7,
@@ -44,7 +36,7 @@ def main(args):
         beta=1.0,  # paramter for the contrastive loss regularizer
         gpu=args.gpu,
         num_workers=8,
-        train_mode="contrastive",  # contrastive, norm
+        train_mode="norm",  # contrastive, norm
         tag="",
         gen_freq=1,
         domain_number=100,
@@ -55,7 +47,7 @@ def main(args):
         seed=args.seed,
         algorithm="ADA",  # ERM, ADA
         model="resnet18",
-        batch_size=32,
+        batch_size=64,
         num_classes=7,
         seen_index=2,
         train_epochs=50,
@@ -88,6 +80,7 @@ def main(args):
 if __name__ == "__main__":
     train_arg_parser = argparse.ArgumentParser(description="parser")
     train_arg_parser.add_argument("--seed", type=int, default=1, help="")
+    train_arg_parser.add_argument("--gpu", type=str, default='0', help="")
     train_arg_parser.add_argument(
         "--save_path",
         type=str,
@@ -95,6 +88,6 @@ if __name__ == "__main__":
         help="path to saved models and results",
     )
     args = train_arg_parser.parse_args()
-    gpu = ",".join([str(i) for i in get_freer_gpu()[0:1]])
-    args.gpu = gpu
+    # gpu = ",".join([str(i) for i in get_freer_gpu()[0:1]])
+    # args.gpu = gpu
     main(args)

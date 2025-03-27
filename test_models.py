@@ -6,8 +6,7 @@ from model_mnist import ModelADASemantics as AdvST_MNIST
 
 
 from model_pacs import ModelBaseline as ERM_PACS
-from model_pacs import ModelADA as ADA_PACS
-from model_pacs import ModelADASemantics as AdvST_PACS
+
 
 from model_domainnet import ModelBaseline as ERM_DomainNet
 from model_domainnet import ModelADA as ADA_DomainNet
@@ -41,12 +40,12 @@ def main(args):
             elif args.algorithm == "AdvST":
                 model_obj = AdvST_MNIST(flags=args)
         elif dataset == "pacs":
-            if args.algorithm == "ERM":
+            if args.algorithm == "Target":
                 model_obj = ERM_PACS(flags=args)
-            elif args.algorithm == "ADA":
-                model_obj = ADA_PACS(flags=args)
-            elif args.algorithm == "AdvST":
-                model_obj = AdvST_PACS(flags=args)
+            # elif args.algorithm == "ADA":
+            #     model_obj = ADA_PACS(flags=args)
+            # elif args.algorithm == "AdvST":
+            #     model_obj = AdvST_PACS(flags=args)
 
         elif dataset == "domainnet":
             args.loops_min = -1  # use all test data for evaluation

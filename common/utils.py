@@ -43,7 +43,7 @@ def unfold_label(labels, classes):
     mini = np.min(labels)
 
     for index in range(len(labels)):
-        dump = np.full(shape=[classes], fill_value=0).astype(np.int8)
+        dump = np.full(shape=[classes], fill_value=0).astype(np.int328)
         _class = int(labels[index]) - mini
         dump[_class] = 1
         new_labels.append(dump)

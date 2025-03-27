@@ -11,7 +11,7 @@ from torchvision import datasets
 from torchvision.datasets.utils import download_url
 from common.utils import unfold_label, shuffle_data
 from collections import Counter
-from common.autoaugment import SVHNPolicy, CIFAR10Policy
+from common.autoaugment import SVHNPolicy, CIFAR10Policy, ImageNetPolicy
 from common.randaugment import RandAugment
 from functools import partial
 from torch.utils.data import Dataset
@@ -60,7 +60,7 @@ class PACS(Dataset):
         f = h5py.File(path, "r")
         self.x = np.array(f['images'])
         self.y = np.array(f['labels'])
-        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int)*(-1))
+        self.op_labels = torch.tensor(np.ones(len(self.y),dtype=np.int32)*(-1))
         if ratio is not None:
             num = len(self.x)
             indexes = np.random.permutation(num)
@@ -78,17 +78,19 @@ class PACS(Dataset):
         self.x = torch.tensor(self.x).permute(0,3,1,2)
         self.y -= np.min(self.y)
         self.y = torch.tensor(self.y.astype(np.int64))
-        self.preprocess = transforms.Compose([
-                transforms.Resize((224,224)),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
-        self.train_transform = transforms.Compose([
-                    transforms.RandomResizedCrop(224),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                ])
+        # self.preprocess = transforms.Compose([
+        #         transforms.Resize((256,256)),
+        #         transforms.ToTensor(),
+        #         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        #     ])
+        # self.train_transform = transforms.Compose([
+        #             transforms.Resize(256),
+        #             ImageNetPolicy(),
+        #             # transforms.RandomResizedCrop(224),
+        #             # transforms.RandomHorizontalFlip(),
+        #             transforms.ToTensor(),
+        #             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        #         ])
         self.image_denormalise = Denormalise([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     def __len__(self):
         return len(self.x)
@@ -105,7 +107,7 @@ class PACS(Dataset):
 
 class PACSMultiple(Dataset):
     def __init__(self, root_folder, names, split='train', transform=None):
-        
+
         if split == 'train':
             if transform is None:
                 self.transform = transforms.Compose([
@@ -163,7 +165,7 @@ class PACSMultiple(Dataset):
 class PACSTensor(Dataset):
     def __init__(self, root_folder, name, split='train', transform=None):
         path = os.path.join(root_folder, '{}_{}.hdf5'.format(name,split))
-        
+
         f = h5py.File(path, "r")
         self.x = np.array(f['images'])
         self.y = np.array(f['labels'])

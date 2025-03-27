@@ -63,9 +63,9 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AvgPool2d(7, stride=1)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
-
+        self.pro_head = nn.Linear(512 * block.expansion, 512)
         if 'contrastive' in contrastive:
-            self.pro_head = nn.Linear(512 * block.expansion, 128)
+
             self.contrastive = True
         else:
             self.contrastive = False
@@ -79,7 +79,7 @@ class ResNet(nn.Module):
 
     def get_proj(self, fea):
         z = self.pro_head(fea)
-        z = F.normalize(z,dim=-1)
+        # z = F.normalize(z, dim=-1)
         return z
 
     def bn_eval(self):
@@ -104,9 +104,12 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, classifier=False):
 
         end_points = {}
+        if classifier:
+            # x = self.get_proj(x)
+            return self.fc(x)
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -120,10 +123,13 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
 
+        # end_points['Embedding'] = x - x.mean(dim=1, keepdim=True)
         end_points['Embedding'] = x
-        if self.contrastive:
-            end_points['Projection'] = self.get_proj(x)
+        # if self.contrastive:
+        end_points['Projection'] = self.get_proj(x)
         x = self.fc(x)
+        # print(end_points['Embedding'].shape)
+        # exit()
 
         end_points['Predictions'] = F.softmax(input=x, dim=-1)
 
@@ -136,7 +142,7 @@ def resnet18(pretrained=False, **kwargs):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
-    if pretrained:
+    if True:
         pretrained_dict = model_zoo.load_url(model_urls['resnet18'])
         model_dict = model.state_dict()
         # 1. filter out unnecessary keys
