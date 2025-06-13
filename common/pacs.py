@@ -101,8 +101,7 @@ class PACS(Dataset):
         op = self.op_labels[index]
         if op < 0:
             x = transforms.ToPILImage()(x)
-            x = self.transform(x)
-        return x, y, op
+        return self.transform(x), self.transform(x), y, op
 
 
 class PACSMultiple(Dataset):

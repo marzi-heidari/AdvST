@@ -1,21 +1,27 @@
 from __future__ import print_function, absolute_import, division
 
-import clip
-from info_nce import InfoNCE, info_nce
+import os
+
+from transformers import LlavaProcessor, LlavaForConditionalGeneration
+
+
+from clip import clip
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from minigpt4.common import registry
+from minigpt4.common.config import Config
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import kornia
 import matplotlib.pyplot as plt
-import torch
-import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
-from torch import cosine_similarity
+
+
+from torch.nn import DataParallel
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-
-from common.autoaugment import ImageNetPolicy
 from common.pacs import PACS, PACSMultiple
-from common.utils import *
 from common.utils import (
     fix_all_seed,
     write_log,
@@ -25,9 +31,13 @@ from common.utils import (
 from config import PACS_DATA_FOLDER
 from models.resnet_vanilla import resnet18
 
-
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 # https://github.com/HAHA-DL/Episodic-DG
 def bn_eval(model):
+    for name, param in model.named_parameters():
+        if 'conv1' in name or 'bn1' in name:
+            param.requires_grad = False
+
     for m in model.modules():
         if isinstance(m, torch.nn.BatchNorm2d):
             m.eval()
@@ -37,6 +47,38 @@ def bn_eval(model):
 
 # https://github.com/mil-tokyo/dg_mmld/blob/aef26b2745beabc6356accd183ff3e17f71657ce/util/scheduler.py
 from torch.optim.lr_scheduler import _LRScheduler
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class InfoNCELoss(nn.Module):
+    def __init__(self, temperature=0.07):
+        super(InfoNCELoss, self).__init__()
+        self.temperature = temperature
+
+    def forward(self, features_q, features_k):
+        """
+        features_q: tensor of shape (batch_size, feature_dim)
+        features_k: tensor of shape (batch_size, feature_dim)
+        Positive pairs are (features_q[i], features_k[i]).
+        """
+        batch_size = features_q.shape[0]
+
+        # Normalize the features
+        features_q = F.normalize(features_q, dim=1)
+        features_k = F.normalize(features_k, dim=1)
+
+        # Compute logits: (batch_size, batch_size)
+        logits = torch.matmul(features_q, features_k.T) / self.temperature
+
+        # Targets: diagonal are positives
+        labels = torch.arange(batch_size, device=features_q.device)
+
+        # Cross-entropy loss
+        loss = F.cross_entropy(logits, labels)
+        return loss
 
 
 class inv_lr_scheduler(_LRScheduler):
@@ -99,46 +141,18 @@ def rotate_aug(x, angle):
     return rgb_img
 
 
-def translate_aug(x, trans):
-    h = x.shape[-1] * 0.1
-    rgb_img = kornia.geometry.transform.translate(x, torch.clamp(trans, -1, 1) * h)
-    return rgb_img
+class CenterLoss(nn.Module):
+    def __init__(self, num_classes, feat_dim):
+        super(CenterLoss, self).__init__()
+        self.centers = nn.Parameter(torch.randn(num_classes, feat_dim))
 
-
-def invert_aug(x, max_val):
-    x = torch.clamp(max_val, 0.5, 1.0).view(len(max_val), 1, 1, 1) - x
-    return x
-
-
-def shear_aug(x, val):
-    x = kornia.geometry.transform.shear(x, val)
-    return x
-
-
-def contrast_aug(x, con):
-    rgb_img = kornia.enhance.adjust_contrast(x, torch.clamp(con, 0.1, 1.9))
-    return rgb_img
-
-
-def sharpness_aug(x, factor):
-    x = kornia.enhance.sharpness(x, torch.clamp(factor, 0, 1))
-    return x
-
-
-def scale_aug(x, factor):
-    factor = factor.view(len(factor), 1)  # for kornia 0.4
-    x = kornia.geometry.transform.scale(x, torch.clamp(factor, 0.5, 2.0))
-    return x
-
-
-def solarize_aug(x, factor):
-    x = kornia.enhance.solarize(x, additions=torch.clamp(factor, -0.499, 0.499))
-    return x
-
-
-def equalize_aug(x, factor):
-    ex = kornia.enhance.equalize(torch.clamp(x, 0.001, 1.0))
-    return ex.detach() + x - x.detach()
+    def forward(self, features, labels):
+        """
+        features: (N, D)
+        labels: (N,)
+        """
+        centers_batch = self.centers[labels]
+        return ((features - centers_batch) ** 2).sum(dim=1).mean()
 
 
 def posterize_aug(x, factor):
@@ -272,6 +286,7 @@ class ModelBaseline(object):
                 num_classes=flags.num_classes,
                 contrastive=flags.train_mode,
             )
+        self.network = DataParallel(self.network)
         self.network = self.network.cuda()
 
         print(self.network)
@@ -287,27 +302,37 @@ class ModelBaseline(object):
         flags_log = os.path.join(flags.logs, "flags_log.txt")
         write_log(flag_str, flags_log)
 
+    def whitening_loss(self, feat):
+        C = torch.cov(feat)
+        C_diag = torch.diag(C, 0)
+        diag_ = 0.5 * (torch.norm(C, 'fro') ** 2 - torch.norm(C_diag, 2) ** 2)
+        return diag_
+
     def setup_path(self, flags):
         root_folder = PACS_DATA_FOLDER
         dataset_names = ["art_painting", "cartoon", "photo", "sketch"]
         seen_index = flags.seen_index
         self.preprocess = transforms.Compose(
             [
+                transforms.Resize(288),
                 transforms.Resize(224),
                 transforms.ToTensor(),
                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ]
         )
-        self.train_transform = transforms.Compose(
-            [
-                # transforms.Resize(256),
-                # ImageNetPolicy(),
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ]
-        )
+        self.train_transform = transforms.Compose([
+            transforms.Resize(288),
+            transforms.RandomResizedCrop(224),
+            transforms.ColorJitter(0.8, 0.8, 0.8, 0.2),
+            # transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.0, hue=0.0),
+            # transforms.RandomAffine(0, shear=20, fill=128),
+            # transforms.RandomPosterize(bits=3, p=0.5),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406],
+                                 [0.229, 0.224, 0.225]),
+        ])
         if not os.path.exists(flags.logs):
             os.makedirs(flags.logs)
 
@@ -370,23 +395,25 @@ class ModelBaseline(object):
         for name, param in self.network.named_parameters():
             print(name, param.size())
         parameter_list = []
-        classifier_param = list(map(id, self.network.fc.parameters()))
-        backbone_param = filter(lambda p: id(p) not in classifier_param and p.requires_grad, self.network.parameters())
-        parameter_list.append({'params': backbone_param, 'lr': flags.lr})
-        parameter_list.append({'params': self.network.fc.parameters(), 'lr': flags.lr})
+        # classifier_param = list(map(id, self.network.fc.parameters()))
+        # backbone_param = filter(lambda p: id(p) not in classifier_param and p.requires_grad, self.network.parameters())
+        # parameter_list.append({'params': backbone_param, 'lr': flags.lr})
+        parameter_list.append({'params': self.network.parameters(), 'lr': flags.lr})
         self.optimizer = torch.optim.SGD(
             parameter_list,
             weight_decay=flags.weight_decay,
             momentum=flags.momentum,
             nesterov=True,
         )
+        # self.optimizer = torch.optim.AdamW(parameter_list, lr=3e-4, weight_decay=1e-2)
+        # self.optimizer = Lookahead(self.optimizer)
 
         if flags.model == "resnet18":
             self.scheduler = lr_scheduler.CosineAnnealingLR(
                 self.optimizer, flags.train_epochs * len(self.train_loader)
             )
         self.loss_fn = torch.nn.CrossEntropyLoss()
-        self.cnt_loss = InfoNCE()
+        self.cnt_loss = InfoNCELoss()
         self.loss_per_ele = torch.nn.CrossEntropyLoss(reduction="none")
 
     def save_model(self, file_name, flags):
@@ -395,169 +422,10 @@ class ModelBaseline(object):
         outfile = os.path.join(flags.model_path, file_name)
         torch.save({"state": self.network.state_dict(), "args": flags}, outfile)
 
-    def projection1_test_b(self, Z, phi_t):
-        """
-        Implements Projection 1.
-        Z: (n, d) tensor of backbone features.
-        phi_s: (d,) tensor for the source domain.
-        phi_t: (d,) tensor for the target domain.
-
-        Computes:
-            Omega_t = Z * diag(phi_t)
-            Omega_s = Z * diag(phi_s)
-        then SVD on each and
-            Ẑ_proj = U_t U_sᵀ Z V_s V_tᵀ
-        """
-        D_phi_t = torch.diag(phi_t).to(Z.dtype)
-        # D_phi_s = torch.diag(phi_s).to(Z.dtype)
-        #
-        # # Compute Omega matrices: (n,d) = (n,d) @ (d,d)
-        # Omega_t = self.elementwise_pearson_corr(phi_t, Z)
-        Omega_t = Z @ D_phi_t
-        # D_phi_s = torch.diag(phi_s).to(Z.dtype)
-
-        # Compute the outer product v^T v for each batch element
-        # outer_products = torch.bmm(Z.unsqueeze(2), Z.unsqueeze(1))  # Shape: (B, n, n)
-
-        # Add the diagonal matrix to each batch element
-        # Omega_t = D_phi_t + outer_products  # Broadcasting over batch
-        # Omega_s = D_phi_s + outer_products  # Broadcasting over batch
-
-        # Compute SVD on Omega_t and Omega_s (reduced SVD)
-        U_t, _, Vh_t = torch.linalg.svd(Omega_t, full_matrices=False)
-        k = int(0.5 * 512)
-        V_t = Vh_t.transpose(-2, -1)
-        V_t = V_t[..., :k]
-
-        # Get V matrices (transpose of Vh)
-        # V_t = V_t.transpose(-2, -1)
-
-        # Compute the projection: Ẑ_proj = U_t U_sᵀ Z V_s V_tᵀ
-        # hat_Z = U_t @ (U_t.transpose(0, 1) @ Z) @ (V_t @ V_t.transpose(0, 1))
-        hat_Z = Z @ V_t @ V_t.transpose(0, 1)
-
-        return F.normalize(hat_Z, p=2, dim=-1) * Z.norm(p=2, dim=1).mean() + Z
-
-    def projection1_test(self, Z, phi_t):
-        """
-        Implements Projection 1.
-        Z: (n, d) tensor of backbone features.
-        phi_s: (d,) tensor for the source domain.
-        phi_t: (d,) tensor for the target domain.
-
-        Computes:
-            Omega_t = Z * diag(phi_t)
-            Omega_s = Z * diag(phi_s)
-        then SVD on each and
-            Ẑ_proj = U_t U_sᵀ Z V_s V_tᵀ
-        """
-        D_phi_t = torch.diag(phi_t).to(Z.dtype)
-        # D_phi_s = torch.diag(phi_s).to(Z.dtype)
-        #
-        # # Compute Omega matrices: (n,d) = (n,d) @ (d,d)
-        # Omega_t = self.elementwise_pearson_corr(phi_t, Z)
-        Omega_t = Z @ D_phi_t
-        # D_phi_s = torch.diag(phi_s).to(Z.dtype)
-
-        # Compute the outer product v^T v for each batch element
-        # outer_products = torch.bmm(Z.unsqueeze(2), Z.unsqueeze(1))  # Shape: (B, n, n)
-
-        # Add the diagonal matrix to each batch element
-        # Omega_t = D_phi_t + outer_products  # Broadcasting over batch
-        # Omega_s = D_phi_s + outer_products  # Broadcasting over batch
-
-        # Compute SVD on Omega_t and Omega_s (reduced SVD)
-        U_t, _, Vh_t = torch.linalg.svd(Omega_t, full_matrices=False)
-        k = int(0.5 * 512)
-        V_t = Vh_t.transpose(-2, -1)
-        V_t = V_t[..., :k]
-        U_t = U_t[..., :k]
-        # U_s = U_s[..., :k]
-
-        # Get V matrices (transpose of Vh)
-        # V_t = V_t.transpose(-2, -1)
-
-        # Compute the projection: Ẑ_proj = U_t U_sᵀ Z V_s V_tᵀ
-        hat_Z = U_t @ (U_t.transpose(0, 1) @ Z) @ (V_t @ V_t.transpose(0, 1))
-        # hat_Z = Z @ V_t @ V_t.transpose(0, 1)
-
-        return F.normalize(hat_Z, p=2, dim=-1) * Z.norm(p=2, dim=1).mean() + Z
-
-    def elementwise_pearson_corr(self, v: torch.Tensor, Z: torch.Tensor) -> torch.Tensor:
-        """
-        Computes the Pearson correlation between each element in Z with each element in v,
-        returning an m x n matrix of correlations.
-
-        Parameters:
-        v (torch.Tensor): A 1D tensor of shape (n,).
-        Z (torch.Tensor): A 2D tensor of shape (m, n).
-
-        Returns:
-        torch.Tensor: A 2D tensor of shape (m, n), containing correlation values for each element.
-        """
-        assert v.shape[0] == Z.shape[1], "v must have the same number of elements as the columns of Z"
-        v = v.repeat(Z.size(0), 1).to(Z.dtype)
-        # Center v and Z (subtract mean)
-        v_mean = v.mean()
-        Z_mean = Z.mean(dim=1, keepdim=True)
-
-        v_centered = v - v_mean
-        Z_centered = Z - Z_mean
-
-        # Compute standard deviations
-        v_std = v.std()
-        Z_std = Z.std(dim=1, keepdim=True)
-
-        # Pearson correlation (element-wise)
-        correlation = (Z_centered * v_centered) / (v_std * Z_std)
-
-        return correlation
-
-    def projection2_U(self, Z, phi_s, phi_t, k):
-        """
-        Implements Projection 2 using U instead of V.
-
-        Args:
-            Z (torch.Tensor): Shape (B, d) - feature tensor for batch.
-            phi_s (torch.Tensor): Shape (d,) - source domain representation.
-            phi_t (torch.Tensor): Shape (d,) - target domain representation.
-
-        Returns:
-            torch.Tensor: Shape (B, d) - projected feature tensor.
-        """
-
-        B, d = Z.shape  # Batch size, feature dimension
-
-        # Ensure phi_s and phi_t are broadcastable
-        # phi_t = phi_t.view(1, d)  # Reshape to (1, d) for broadcasting
-        # phi_s = phi_s.view(1, d)
-
-        # Compute Omega matrices
-        # Omega_t = Z + phi_t.repeat(B, 1).to(Z.dtype)  # Shape: (B, d)
-        # Omega_s = Z + phi_s.repeat(B, 1).to(Z.dtype)  # Shape: (B, d)
-        Omega_t = self.elementwise_pearson_corr(phi_t, Z)
-        Omega_s = self.elementwise_pearson_corr(phi_s, Z)
-
-        # Compute SVD
-        U_t, S_t, Vh_t = torch.linalg.svd(Omega_t, full_matrices=False)  # (B, d, d)
-        U_s, S_s, Vh_s = torch.linalg.svd(Omega_s, full_matrices=False)  # (B, d, d)
-
-        # Extract top k_t singular vectors from target and bottom k_s singular vectors from source
-        U_t_top = U_t[..., :k]  # Top k_t singular vectors (B, d, k_t)
-        U_s_bottom = U_s[..., -k:]  # Bottom k_s singular vectors (B, d, k_s)
-
-        # Compute projection matrices
-        P_t = U_t_top @ U_t_top.transpose(-2, -1)  # Shape: (B, d, d)
-        P_s = U_s_bottom @ U_s_bottom.transpose(-2, -1)  # Shape: (B, d, d)
-
-        # Compute projected feature matrix
-        z_pos = (P_t @ Z)
-        z_neg = P_s @ Z
-        Z_proj = z_pos + (z_neg)  # Shape: (B, d)
-
-        return (F.normalize(Z_proj, p=2, dim=-1) * Z.norm(p=2, dim=1).mean()
-                ), z_pos, z_neg
-        # return Z_proj
+    def entropy_loss(self, x):
+        out = F.softmax(x, dim=1) * F.log_softmax(x, dim=1)
+        out = -1.0 * out.sum(dim=1)
+        return out.mean()
 
     def standardize(self, x, dim=0, eps=1e-6):
         """
@@ -573,107 +441,46 @@ class ModelBaseline(object):
         std = x.std(dim=dim, keepdim=True)
         return (x - mean) / (std + eps)
 
-    def projection2_U_test(self, Z, phi_s, phi_t):
-        """
-        Implements Projection 2 using U instead of V.
-
-        Args:
-            Z (torch.Tensor): Shape (B, d) - feature tensor for batch.
-            phi_s (torch.Tensor): Shape (d,) - source domain representation.
-            phi_t (torch.Tensor): Shape (d,) - target domain representation.
-
-        Returns:
-            torch.Tensor: Shape (B, d) - projected feature tensor.
-        """
-
-        B, d = Z.shape  # Batch size, feature dimension
-
-        # Ensure phi_s and phi_t are broadcastable
-        # phi_t = phi_t.view(1, d)  # Reshape to (1, d) for broadcasting
-        # phi_s = phi_s.view(1, d)
-        #
-        # # Compute Omega matrices
-        # Omega_t = Z + phi_t.repeat(B, 1).to(Z.dtype)  # Shape: (B, d)
-        # Omega_s = Z + phi_s.repeat(B, 1).to(Z.dtype)  # Shape: (B, d)
-        Omega_t = self.elementwise_pearson_corr(phi_t, Z)
-        Omega_s = self.elementwise_pearson_corr(phi_s, Z)
-
-        # Compute SVD
-        U_t, S_t, Vh_t = torch.linalg.svd(Omega_t, full_matrices=False)  # (B, d, d)
-        U_s, S_s, Vh_s = torch.linalg.svd(Omega_s, full_matrices=False)  # (B, d, d)
-        k = int(0.5 * d)
-        # Extract top k_t singular vectors from target and bottom k_s singular vectors from source
-        U_t_top = U_t[..., -k:]  # Top k_t singular vectors (B, d, k_t)
-        U_s_bottom = U_s[..., :k]  # Bottom k_s singular vectors (B, d, k_s)
-
-        # Compute projection matrices
-        P_t = U_t_top @ U_t_top.transpose(-2, -1)  # Shape: (B, d, d)
-        P_s = U_s_bottom @ U_s_bottom.transpose(-2, -1)  # Shape: (B, d, d)
-
-        # Compute projected feature matrix
-        Z_proj = (P_t @ Z)  # Shape: (B, d)
-
-        return (F.normalize(Z_proj, p=2, dim=-1) * Z.norm(p=2, dim=1).mean())
-        # return Z_proj
-
     def projection_3(self, Z, ph_t):
+        ph_t = ph_t.to(Z.dtype)
         ndot = (ph_t @ ph_t.transpose(-2, -1))[0][0]
         P = (ph_t.transpose(-2, -1) @ ph_t) / ndot
-        return F.normalize(Z @ P, p=2, dim=1) * Z.norm(p=2, dim=1).mean()
+        return Z @ P
+        # return F.normalize(Z @ P, p=2, dim=1) * Z.norm(p=2, dim=1).mean()
 
-    def projection2_V_test(self, Z, phi_t):
+    def orthogonality_loss(self, features, labels):
         """
-        Implements Projection 1.
-        Z: (n, d) tensor of backbone features.
-        phi_s: (d,) tensor for the source domain.
-        phi_t: (d,) tensor for the target domain.
+        Encourages orthogonality between class prototypes.
 
-        Computes:
-            Omega_t = Z * diag(phi_t)
-            Omega_s = Z * diag(phi_s)
-        then SVD on each and
-            Ẑ_proj = U_t U_sᵀ Z V_s V_tᵀ
+        Args:
+            features: (N, D) tensor
+            labels: (N,) tensor
+        Returns:
+            loss: scalar
         """
-        B, d = Z.shape  # Batch size, feature dimension
+        unique_labels = torch.unique(labels)
+        class_prototypes = []
 
-        # Ensure phi_s and phi_t are broadcastable
-        # phi_t = phi_t.view(1, d)  # Reshape to (1, d) for broadcasting
-        # phi_s = phi_s.view(1, d)
-        D_phi_t = torch.diag(phi_t).to(Z.dtype)
-        # D_phi_s = torch.diag(phi_s).to(Z.dtype)
-        # #
-        # # # Compute Omega matrices: (n,d) = (n,d) @ (d,d)
-        Omega_t = Z @ D_phi_t
-        # Omega_s = Z @ D_phi_s
-        # Compute Omega matrices
-        # Omega_t = Z * phi_t  # Shape: (B, d)
-        # Omega_s = Z * phi_s  # Shape: (B, d)
-        # Omega_t = self.elementwise_pearson_corr(phi_t, Z)
+        for lbl in unique_labels:
+            mask = labels == lbl
+            if mask.sum() < 2:
+                continue
+            class_feat = features[mask]
+            proto = class_feat.mean(dim=0)
+            proto = F.normalize(proto, dim=0)
+            class_prototypes.append(proto)
 
-        # EMA update for Omega_t and Omega_s
+        if len(class_prototypes) < 2:
+            return torch.tensor(0.0, device=features.device)
 
-        # Compute SVD
-        U_t, S_t, Vh_t = torch.linalg.svd(Omega_t, full_matrices=False)  # (B, d), (B, d, d)
-        # U_s, S_s, Vh_s = torch.linalg.svd(Omega_s, full_matrices=False)  # (B, d), (B, d, d)
+        prototypes = torch.stack(class_prototypes)  # (C, D)
+        sim_matrix = torch.matmul(prototypes, prototypes.T)  # (C, C)
+        identity = torch.eye(sim_matrix.size(0), device=features.device)
+        off_diag = sim_matrix - identity  # zero out diagonals
 
-        # Get V matrices
-        V_t = Vh_t.transpose(-2, -1)  # Shape: (B, d, d)
-        # V_s = Vh_s.transpose(-2, -1)  # Shape: (B, d, d)
-        k = int(0.8 * d)
-        # Extract top k_t singular vectors from target and bottom k_s singular vectors from source
-        V_t_top = V_t[..., :k]  # Top k_t singular vectors (B, d, k_t)
-        # V_s_bottom = V_s[..., :k]  # Bottom k_s singular vectors (B, d, k_s)
+        return (off_diag ** 2).mean()
 
-        # Compute projection matrices
-        P_t = V_t_top @ V_t_top.transpose(-2, -1)  # Shape: (B, d, d)
-        # P_s = V_s_bottom @ V_s_bottom.transpose(-2, -1)  # Shape: (B, d, d)
-
-        # Compute projected feature matrix
-        Z_proj = Z @ P_t + Z @ P_t  # Shape: (B, d)
-
-        return F.normalize(Z_proj, p=2, dim=-1) * torch.norm(Z, p=2, dim=-1).mean()
-
-    def projection2_V(self, Z, phi_t):
+    def projection2_V(self, Z, phi_t, energy_threshold=0.5):
         """
         Implements Projection 1.
         Z: (n, d) tensor of backbone features.
@@ -692,36 +499,35 @@ class ModelBaseline(object):
         # phi_t = phi_t.view(1, d)  # Reshape to (1, d) for broadcasting
         # phi_s = phi_s.view(1, d)
 
-        # Compute Omega matrices
-        # Omega_t = Z + phi_t.repeat(B, 1).to(Z.dtype)  # Shape: (B, d)
-        # Omega_s = Z + phi_s.repeat(B, 1).to(Z.dtype)  # Shape: (B, d)
-        # Omega_t = self.elementwise_pearson_corr(phi_t, Z)
-        # Omega_s = self.elementwise_pearson_corr(phi_s, Z)
-        D_phi_t = torch.diag(phi_t).to(Z.dtype)
+        # D_phi_t = torch.diag(phi_t).to(Z.dtype)
+        mu_z = Z.mean(dim=0, keepdim=True)
+        sigma_z = Z.std(dim=0, unbiased=False, keepdim=False) + 1e-6  # prevent division by zero
+        Z_norm = (Z - mu_z)
+        # @ torch.diag(1 / sigma_z).to(Z.device))
+        D_phi = torch.diag(phi_t).to(Z.dtype)
+        Omega_t = Z_norm + phi_t.to(Z.dtype)
 
         # # # Compute Omega matrices: (n,d) = (n,d) @ (d,d)
-        Omega_t = Z @ D_phi_t
+        # Omega_t = Z @ D_phi_t
         # Omega_t = self.standardize(Omega_t, dim=1)
-
 
         # Compute SVD
         U_t, S_t, Vh_t = torch.linalg.svd(Omega_t, full_matrices=False)  # (B, d, d)
-        # U_s, S_s, Vh_s = torch.linalg.svd(Omega_s, full_matrices=False)  # (B, d, d)
-        k = int(0.5 * d)
+
         # Extract top k_t singular vectors from target and bottom k_s singular vectors from source
-        V_top = Vh_t.transpose(-2, -1)[..., :k]  # Top k_t singular vectors (B, d, k_t)
+        V_top = Vh_t.transpose(-2, -1)[..., :int(0.1 * 512)]  # Top k_t singular vectors (B, d, k_t)
         # V_bottom = Vh_s.transpose(-2, -1)[..., -k:]  # Bottom k_s singular vectors (B, d, k_s)
 
         # Compute projection matrices
         P_t = V_top @ V_top.transpose(-2, -1)  # Shape: (B, d, d)
 
-
         # Compute projected feature matrix
         z_pos = Z @ P_t
 
         Z_proj = z_pos
+        # loss += 0.01
 
-        return (F.normalize(Z_proj, p=2, dim=-1) * Z.norm(p=2, dim=1).mean())
+        return (F.normalize(Z_proj, p=2, dim=-1) * Z.norm(p=2, dim=1).mean()), S_t
 
     ###############################
     # Projection 1 Function
@@ -867,8 +673,12 @@ class ModelBaseline(object):
 
         return loss.mean()
 
-
-
+    def cosine_loss_with_temperature(self, student, teacher, temperature=1.0):
+        student = F.normalize(student, dim=-1)
+        teacher = F.normalize(teacher, dim=-1)
+        cosine_sim = (student * teacher).sum(dim=-1)
+        loss = 1 - cosine_sim / temperature
+        return loss.mean()
 
     def prototype_alignment_loss(self, features_clip, features_resnet, labels):
         """
@@ -893,46 +703,90 @@ class ModelBaseline(object):
     def train(self, flags):
         os.makedirs(flags.model_path, exist_ok=True)
         best_val_acc = -1
-        model, preprocess = clip.load("ViT-B/32", device=f'cuda:{0}')
+        print(torch.cuda.device_count())
+        print(torch.cuda.get_device_name(0))
+        # model, preprocess = clip.load("ViT-B/32")
+        model_id = "llava-hf/llava-1.5-7b-hf"
+        processor = LlavaProcessor.from_pretrained(model_id)
+        model = LlavaForConditionalGeneration.from_pretrained(model_id, torch_dtype=torch.float16)
 
-        t_s = clip.tokenize(
-            [
-                "A high-resolution, lifelike image of an object captured with a camera, displaying realistic colors, shadows, and textures."]).to(
-            f'cuda:{0}')
-        t_t = clip.tokenize(
-            [
-                "Artistic renditions of objects and scenes, often with visible brushstrokes, varied textures, and abstract or exaggerated forms"]).to(
-            f'cuda:{0}')
+        # Move to DataParallel on multiple GPUs
+        model = torch.nn.DataParallel(model).cuda()
+
+        # New BLIP loading
+        # processor = BlipProcessor.from_pretrained("Salesforce/blip-itm-base-coco")
+        # model = BlipForImageTextRetrieval.from_pretrained("Salesforce/blip-itm-base-coco").cuda()
+        model.eval()
+
+        # t_s = clip.tokenize(
+        #     [
+        #         "A higdh-resolution, lifelike image of an object captured with a camera, displaying realistic colors, shadows, and textures."]).to(
+        #     f'cuda:{0}')
+        # t_t = clip.tokenize(
+        #     [
+        #         "Artistic renditions of objects and scenes, often with visible brushstrokes, varied textures, and abstract or exaggerated forms"]).to(
+        #     f'cuda:{0}')
         # t_t = clip.tokenize(
         #     [
         #         "A colorful and stylized cartoon drawing of an object, with bold outlines, simplified details, and exaggerated proportions in a comic or animated style.-["]).to(
         #     f'cuda:{0}')
-        # t_s = clip.tokenize(
-        #     ["Realistic"]).to(
-        #     f'cuda:{0}')
-        # t_t = clip.tokenize(
-        #     ["Art painting"]).to(
-        #     f'cuda:{0}')
+        t_s = clip.tokenize(
+            ["Realistic"]).to(
+            f'cuda:{0}')
+        t_t = clip.tokenize(
+            ["Sketch drawing"]).to(
+            f'cuda:{0}')
+        # ----------- Encode Text -----------
 
+        # Encode text
+        text = 'realistic'
+        text_inputs = processor(text=text, return_tensors="pt").to("cuda", torch.float16)
+
+
+        # text_inputs = processor(text=["Realistic"], return_tensors="pt").to("cuda")
         with torch.no_grad():
-            phi_s = model.encode_text(t_s)
-            phi_t = model.encode_text(t_t)
+            # text_outputs = model.text_encoder(**text_inputs)
+            # phi_s = text_outputs.last_hidden_state[:, 0, :]  # CLS token
+
+            # t_t = clip.tokenize(["Sketch drawing"]).to(f'cuda:{0}')
+            # phi_t = model.encode_text(t_t)
+
+            # text_inputs = processor(text=["Sketch drawing"], return_tensors="pt").to("cuda")
+            #
+            # text_outputs = model.text_encoder(**text_inputs)
+            # phi_t = text_outputs.last_hidden_state[:, 0, :]  # CLS token
+            # phi_s = model.encode_text(t_s)
+            # phi_t = model.encode_text(t_t)
+            text_outputs = model.language_model.model.embed_tokens(text_inputs["input_ids"])
+            # Shape: [batch_size, seq_len, hidden_dim]
+            phi_s = text_outputs.mean(dim=1)  # Simple average pooling
+            phi_t = text_outputs.mean(dim=1)  # Simple average pooling
+
+
 
         for epoch in range(flags.train_epochs):
             loss_avger = Averager()
             self.network.train()
             bn_eval(self.network)
 
-            for images_train, labels_train, _ in self.train_loader:
+            for images_train, images_train_org, labels_train, _ in self.train_loader:
                 inputs, labels = images_train.cuda(), labels_train.cuda()
+                images_train_org = images_train_org.cuda()
                 o, out = self.network(x=inputs)
+                o1, out1 = self.network(x=images_train_org)
                 Z = out['Embedding']
                 with torch.no_grad():
-                    Z_clip = model.encode_image(inputs)
+                    # Z_clip = model.encode_image(inputs)
+                    Z_clip = vis_processor(inputs)
+                    # img_inputs = processor(images=images_train_org, return_tensors="pt", do_rescale=False).to("cuda")
+                    # vision_outputs = model.vision_model(**img_inputs)
+                    # Z_clip = vision_outputs.last_hidden_state[:, 0, :]  # CLS token
                 #
-                proj1 = self.projection2_V(Z, phi_t.squeeze(0))
-                outputs = self.network(proj1, classifier=True)
-                alpha = 0.2
+                proj1, s1 = self.projection2_V(Z, phi_t.squeeze(0))
+                proj2, s2 = self.projection2_V(out1['Embedding'], phi_t.squeeze(0))
+                # proj1 = F.dropout(proj1, p=0.4, training=self.network.training)
+                outputs = self.network(0.8 * proj1 + 0.2 * Z, classifier=True)
+                alpha = 2.0
 
                 # Sample lambda from Beta distribution
                 lam = torch.distributions.Beta(alpha, alpha).sample().item()
@@ -944,26 +798,29 @@ class ModelBaseline(object):
                 # Z_prime_shuffled = Z[indices]
 
                 # Perform Mixup
+                proj1 = (proj1 + proj2) / 2
                 labels_one_hot = F.one_hot(labels, flags.num_classes).to(Z.dtype)
                 Z_mix = lam * proj1 + (1 - lam) * Z[indices]
                 Y_mix = lam * labels_one_hot + (1 - lam) * labels_one_hot[indices]
-                log_probs = torch.log_softmax(self.network(Z_mix, classifier=True) + 1e-6, dim=1)
+                logit_mix = self.network(Z_mix, classifier=True)
+                log_probs = torch.log_softmax(logit_mix + 1e-6, dim=1)
                 #
                 # # Gather log probabilities corresponding to true labels
                 loss_mixup = -(Y_mix * log_probs).sum(dim=1).mean()
                 # phi_t_mat = phi_t.repeat(Z.size(0), 1).to(Z.dtype)  # Shape: (B, d)
                 # phi_s_mat = phi_s.repeat(Z.size(0), 1).to(Z.dtype)  #
-                align_loss = F.mse_loss(Z, Z_clip.to(Z.dtype)).mean()
-                # align_loss = self.cosine_similarity_loss(Z, Z_clip.to(Z.dtype))
-                # align_loss = self.prototype_alignment_loss(Z_clip.to(Z.dtype), Z, labels)
-                #
-                loss = self.loss_fn(outputs, labels) + loss_mixup + 0.1 * align_loss
+                Z_norm = Z / Z.norm(dim=1, keepdim=True)
+                Z_clip = Z_clip / Z_clip.norm(dim=1, keepdim=True)
+                Z_clip = Z_clip.to(Z.dtype)
+                align_loss = F.mse_loss(Z_norm, Z_clip.to(Z.dtype)).mean()
+                # proj1 = proj1.reshape(inputs.shape[0], -1, proj1.shape[-1])
 
-                # + 0.1 * self.alignment_loss(Z, phi_s.squeeze(0), phi_t.squeeze(0), 1))
-                # + 0.1 * self.alignment_cnt_loss(proj1, z_pos, z_neg, 1))
+                loss = self.loss_fn(outputs,
+                                    labels) + loss_mixup + 0.1 * F.mse_loss(proj1, Z) + 0.1 * align_loss
 
                 self.optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 loss_avger.add(loss.item(), len(labels_train))
                 if flags.model == "resnet18":
@@ -1040,13 +897,13 @@ class ModelBaseline(object):
         test_image_preds = []
         test_labels = []
         with torch.no_grad():
-            for images_test, labels_test, _ in ood_loader:
+            for images_test, _, labels_test, _ in ood_loader:
                 # if images_test.size(0) < 512:
                 #     break
                 images_test, labels_test = images_test.cuda(), labels_test.cuda()
 
                 out, end_points = self.network(images_test)
-                proj = self.projection2_V(end_points['Embedding'],phi_t.squeeze(0))
+                proj, _ = self.projection2_V(end_points['Embedding'], phi_t.squeeze(0))
                 #
                 predictions = self.network(proj, classifier=True)
                 # predictions = end_points['Predictions']
